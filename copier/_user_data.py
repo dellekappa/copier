@@ -188,6 +188,7 @@ class GlobalState:
 
 class QuestionNodeType(Enum):
     LEAF = "leaf"
+    LIST = "list"
     DICT = "dict"
 
 
@@ -203,29 +204,69 @@ class QuestionNode:
     name: str
     config: Any
     state: GlobalState
+    index: Optional[int] = None
     level: int = 0
     parent: Optional[QuestionNode] = None
+    extra_context: AnyByStrDict = field(default_factory=dict)
 
     _type: QuestionNodeType = QuestionNodeType.LEAF
+    _size: int = 0
     _path: str = ""
 
     def __post_init__(self) -> None:
         self.state.refresh_context()
 
-        if "items" in self.config:
+        if self.index is not None:
+            self.extra_context["_idx"] = self.index
+
+        if self.index is None and "size" in self.config:
+            self._size = int(self._render_value(self.config["size"]))
+
+        if self._size > 0:
+            self._type = QuestionNodeType.LIST
+        elif "items" in self.config:
             self._type = QuestionNodeType.DICT
         else:
             self._type = QuestionNodeType.LEAF
 
-        self._path = self.name.replace(".", "\\.")
-        if self.parent is not None:
-            self._path = f"{self.parent._path}.{self._path}"
+        if self.parent is None:
+            self._path = self.name.replace(".", "\\.")
+        else:
+            if self.parent._type == QuestionNodeType.LIST:
+                self._path = f"{self.parent._path}.{self.index}"
+            elif self.parent._type == QuestionNodeType.DICT:
+                name = self.name.replace(".", "\\.")
+                self._path = f"{self.parent._path}.{name}"
 
     def process(self, silent: bool = False) -> None:
-        if self._type == QuestionNodeType.DICT:
+        if self._type == QuestionNodeType.LIST:
+            self._process_as_list(silent)
+        elif self._type == QuestionNodeType.DICT:
             self._process_as_dict(silent)
         else:
             self._process_as_leaf(silent)
+
+    def _process_as_list(self, silent: bool) -> None:
+        for i in range(self._size):
+            node = QuestionNode(
+                name=self.name,
+                config=self.config,
+                state=self.state,
+                parent=self,
+                index=i,
+                extra_context={**self.extra_context},
+            )
+            node.process(silent)
+
+        # Remove answers from the last answers dict that exceed the expected size.
+        for k in list(self.state.answers.last.keys()):
+            match = re.search(rf"^{self._path}\.(\d+)", k)
+            if not match:
+                continue
+            last_idx = int(match.group(1))
+            if last_idx < self._size:
+                continue
+            del self.state.answers.last[k]
 
     def _process_as_dict(self, silent: bool) -> None:
         _silent = silent
@@ -276,6 +317,7 @@ class QuestionNode:
                 state=self.state,
                 parent=self,
                 level=self.level + 1,
+                extra_context={**self.extra_context},
             )
             node.process(_silent)
 
@@ -283,6 +325,7 @@ class QuestionNode:
         question = Question(
             var_name=self._path,
             state=self.state,
+            extra_context={**self.extra_context},
             **self.config,
         )
 
@@ -369,7 +412,7 @@ class QuestionNode:
 
     def _render_value(self, value: Any) -> Any:
         """Render a value using the worker's Jinja environment."""
-        return self.state.render_value(value)
+        return self.state.render_value(value, self.extra_context)
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -385,6 +428,9 @@ class Question:
         state:
             Global state of the question, including answers, template and
             Jinja environment.
+
+        extra_context:
+            A map containing the additional rendering context scoped to this question.
 
         choices:
             Selections available for the user if the question requires them.
@@ -435,6 +481,7 @@ class Question:
 
     var_name: str
     state: GlobalState
+    extra_context: AnyByStrDict = field(default_factory=dict)
     choices: Sequence[Any] | dict[Any, Any] | str = field(default_factory=list)
     multiselect: bool = False
     default: Any = MISSING
@@ -704,6 +751,7 @@ class Question:
         the template.
         """
         extra_context = {
+            **self.extra_context,
             **(extra_answers or {}),
         }
         return self.state.render_value(value, extra_context)
