@@ -64,12 +64,21 @@ class Settings(BaseModel):
 
     def is_trusted(self, repository: str) -> bool:
         """Check if a repository is trusted."""
-        return any(
-            repository.startswith(self.normalize(trusted))
-            if trusted.endswith("/")
-            else repository == self.normalize(trusted)
-            for trusted in self.trust
-        )
+        for trusted in self.trust:
+            if (
+                "::" in repository
+                and "::" not in trusted
+                and repository.startswith(f"{trusted}::")
+            ):
+                return True
+
+            if trusted.endswith("/") and repository.startswith(self.normalize(trusted)):
+                return True
+
+            if repository == self.normalize(trusted):
+                return True
+
+        return False
 
     def normalize(self, url: str) -> str:
         """Normalize an URL using user settings."""

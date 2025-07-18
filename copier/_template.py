@@ -599,6 +599,9 @@ class Template:
             result = Path(clone(self.url_expanded, self.ref))
             if self.ref is None:
                 checkout_latest_tag(result, self.use_prereleases)
+            # Include subfolder if present
+            if self.repo_sub_folder:
+                result = result / self.repo_sub_folder
         if not result.is_dir():
             raise ValueError("Local template must be a directory.")
         with suppress(OSError):
@@ -614,6 +617,26 @@ class Template:
         property returns the expanded version, which should work properly.
         """
         return get_repo(self.url) or self.url
+
+    @cached_property
+    def repo_sub_folder(self) -> str | None:
+        """Get the subfolder inside the repository, if any.
+
+        This is used to determine the subfolder inside the repository that
+        contains the template code. If the template is not a VCS-tracked
+        template, this will return `None`.
+        """
+        if self.vcs == "git" and "::" in self.url:
+            subfolder = self.url.rsplit("::", 1)[1]
+            if ".." in subfolder:
+                raise ValueError(
+                    "Subfolder in the URL cannot contain '..' to prevent directory "
+                    "traversal attacks."
+                )
+            if subfolder.startswith("/"):
+                return subfolder[1:]  # Remove leading slash
+            return subfolder
+        return None
 
     @cached_property
     def version(self) -> Version | None:

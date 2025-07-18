@@ -42,12 +42,13 @@ def get_git_version() -> Version:
 
 
 GIT_PREFIX = ("git@", "git://", "git+", "https://github.com/", "https://gitlab.com/")
+GIT_POSTIFX_PATTERN = r"^(.+\.git)(::.+)?$"
 GIT_POSTFIX = ".git"
 REPLACEMENTS = (
-    (re.compile(r"^gh:/?(.*\.git)$"), r"https://github.com/\1"),
-    (re.compile(r"^gh:/?(.*)$"), r"https://github.com/\1.git"),
-    (re.compile(r"^gl:/?(.*\.git)$"), r"https://gitlab.com/\1"),
-    (re.compile(r"^gl:/?(.*)$"), r"https://gitlab.com/\1.git"),
+    (re.compile(r"^gh:/?(.*\.git)(::.+)?$"), r"https://github.com/\1\2"),
+    (re.compile(r"^gh:/?(.*)(::.+)?$"), r"https://github.com/\1.git\2"),
+    (re.compile(r"^gl:/?(.*\.git)(::.+)?$"), r"https://gitlab.com/\1\2"),
+    (re.compile(r"^gl:/?(.*)(::.+)?$"), r"https://gitlab.com/\1.git\2"),
 )
 
 
@@ -101,6 +102,10 @@ def get_repo(url: str) -> str | None:
             - gl:copier-org/copier
             - git@github.com:copier-org/copier.git
             - git+https://mywebsiteisagitrepo.example.com/
+            - gh:copier-org/copier::sub/folder
+            - gl:copier-org/copier::sub/folder
+            - git@github.com:copier-org/copier.git::sub/folder
+            - git+https://mywebsiteisagitrepo.example.com/::sub/folder
             - /local/path/to/git/repo
             - /local/path/to/git/bundle/file.bundle
             - ~/path/to/git/repo
@@ -109,7 +114,8 @@ def get_repo(url: str) -> str | None:
     for pattern, replacement in REPLACEMENTS:
         url = re.sub(pattern, replacement, url)
 
-    if url.endswith(GIT_POSTFIX) or url.startswith(GIT_PREFIX):
+    if url.startswith(GIT_PREFIX) or re.match(GIT_POSTIFX_PATTERN, url):
+        url = re.sub(GIT_POSTIFX_PATTERN, r"\1", url, count=1)
         if url.startswith("git+"):
             return url[4:]
         if url.startswith("https://") and not url.endswith(GIT_POSTFIX):
