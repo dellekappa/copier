@@ -52,6 +52,7 @@ dev = [
   "pexpect==4.9.0",
   "poethepoet==0.36.0",
   "pre-commit==4.2.0",
+  "pyinstaller==6.12.0",
   "pytest==8.4.1",
   "pytest-cov==6.2.1",
   "pytest-gitconfig==0.7.0",
@@ -93,6 +94,10 @@ help = "run tests"
 [tool.poe.tasks.types]
 cmd = "mypy ."
 help = "run the type (mypy) checker on the codebase"
+
+[tool.poe.tasks.build]
+cmd = "uv run pyinstaller --onefile --name=copier --distpath=dist --workpath=build --specpath=build --add-data=copier:copier --hidden-import=copier --hidden-import=jinja2_ansible_filters --hidden-import=jinja2_ansible_filters.core --hidden-import=jinja2_ansible_filters.utils --hidden-import=jinja2.ext --hidden-import=plumbum --hidden-import=dunamai --hidden-import=pathspec --hidden-import=dpath --hidden-import=funcy --hidden-import=pydantic --hidden-import=pygments --hidden-import=questionary --hidden-import=platformdirs --clean main.py"
+help = "build executable with PyInstaller"
 
 [tool.ruff.lint]
 extend-select = [
