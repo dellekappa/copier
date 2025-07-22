@@ -551,9 +551,13 @@ class Question:
                     if self.default is MISSING:
                         return MISSING
 
-                    result = self.render_value(
-                        self.state.settings.defaults.get(self.var_name, self.default)
-                    )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", MissingFileWarning)
+                        result = self.render_value(
+                            self.state.settings.defaults.get(
+                                self.var_name, self.default
+                            )
+                        )
                     if (
                         self.get_type_name() == "str"
                         and result == ""
