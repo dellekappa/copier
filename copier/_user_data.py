@@ -17,6 +17,7 @@ from os import urandom
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
+import dpath
 import yaml
 from jinja2 import UndefinedError
 from jinja2.sandbox import SandboxedEnvironment
@@ -31,7 +32,7 @@ from questionary.prompts.common import Choice
 from copier.settings import Settings
 
 from ._template import Template
-from ._tools import cast_to_bool, cast_to_str, force_str_end
+from ._tools import cast_to_bool, cast_to_str, force_str_end, parse_dpath_path
 from ._types import (
     MISSING,
     AnyByStrDict,
@@ -39,7 +40,6 @@ from ._types import (
     LazyDict,
     MissingType,
     StrOrPath,
-    unflatten,
 )
 from .errors import (
     CopierAnswersInterrupt,
@@ -164,12 +164,13 @@ class GlobalState:
         self,
         value: Any,
         extra_context: AnyByStrDict | AnyByStrMutableMapping | None = None,
+        extra_answers: AnyByStrDict | AnyByStrMutableMapping | None = None,
     ) -> Any:
         """Render a single templated value using Jinja.
 
         If the value cannot be used as a template, it will be returned as is.
-        `extra_answers` are combined with `self.context` when rendering
-        the template.
+        `extra_context` is combined as is with `self.context` when rendering the template.
+        `extra_answer` are exploded with dpath into the context before rendering the template.
         """
         try:
             template = self.jinja_env.from_string(value)
@@ -181,7 +182,10 @@ class GlobalState:
                 else value
             )
         try:
-            return template.render({**self.context, **(extra_context or {})})
+            ctx = {**self.context, **(extra_context or {})}
+            if extra_answers is not None:
+                write_answers_to_dict(extra_answers, ctx)
+            return template.render(ctx)
         except UndefinedError as error:
             raise UserMessageError(str(error)) from error
 
@@ -737,9 +741,7 @@ class Question:
     def validate_answer(self, answer: Any) -> None:
         """Validate user answer."""
         try:
-            err_msg = self.render_value(
-                self.validator, unflatten({self.var_name: answer})
-            ).strip()
+            err_msg = self.render_value(self.validator, {self.var_name: answer}).strip()
         except Exception as error:
             err_msg = str(error)
         if err_msg:
@@ -762,11 +764,7 @@ class Question:
         `extra_answers` and self.extra_context are combined with `self.state.context` when rendering
         the template.
         """
-        extra_context = {
-            **self.extra_context,
-            **(extra_answers or {}),
-        }
-        return self.state.render_value(value, extra_context)
+        return self.state.render_value(value, self.extra_context, extra_answers)
 
     def parse_answer(self, answer: Any) -> Any:
         """Parse the answer according to the question's type."""
@@ -878,6 +876,16 @@ def load_answersfile_data(
                 MissingFileWarning,
             )
         return {}
+
+
+def write_answers_to_dict(
+    answers: Mapping[str, Any], dest: AnyByStrDict
+) -> AnyByStrDict:
+    """Writes answers into the dictionary expanding them with dpath."""
+    for key, value in answers.items():
+        path = parse_dpath_path(key)
+        dpath.new(dest, path, value)
+    return dest
 
 
 CAST_STR_TO_NATIVE: Mapping[str, Callable[[str], Any]] = {
