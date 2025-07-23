@@ -60,9 +60,14 @@ from ._types import (
     RelativePath,
     StrOrPath,
     VcsRef,
-    unflatten,
 )
-from ._user_data import AnswersMap, GlobalState, QuestionNode, load_answersfile_data
+from ._user_data import (
+    AnswersMap,
+    GlobalState,
+    QuestionNode,
+    load_answersfile_data,
+    write_answers_to_dict,
+)
 from ._vcs import get_git
 from .errors import (
     ExtensionNotFoundError,
@@ -428,7 +433,7 @@ class Worker:
         )
 
         return dict(
-            **unflatten(self.answers.combined),
+            **write_answers_to_dict(self.answers.combined, {}),
             _copier_answers=self._answers_to_remember(),
             _copier_conf=conf,
             _folder_name=self.subproject.local_abspath.name,
