@@ -387,6 +387,18 @@ class Template:
             result["_commit"] = self.commit
         return result
 
+    @cached_property
+    def validation_msg_format(self) -> str:
+        """Get the format for validation error messages.
+
+        This is used to format validation errors for questions.
+        Defaults to `Validation error for question '{var_name}': {err_msg}`
+        """
+        return self.config_data.get(
+            "validation_msg_format",
+            "Validation error for question '{var_name}': {err_msg}",
+        )
+
     def migration_tasks(
         self, stage: Literal["before", "after"], from_template: Template
     ) -> Sequence[Task]:

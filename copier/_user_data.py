@@ -746,7 +746,9 @@ class Question:
             err_msg = str(error)
         if err_msg:
             raise ValueError(
-                f"Validation error for question '{self.var_name}': {err_msg}"
+                self.state.template.validation_msg_format.format(
+                    var_name=self.var_name, err_msg=err_msg
+                )
             )
 
     def get_when(self) -> bool:
