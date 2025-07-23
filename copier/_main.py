@@ -600,7 +600,11 @@ class Worker:
 
         Respects template settings.
         """
-        paths = [str(self.template.local_abspath)]
+        paths = [str(self.template.local_abspath)] + (
+            [str(self.template.shared_lib_abspath)]
+            if self.template.shared_lib_abspath is not None
+            else []
+        )
         loader = FileSystemLoader(paths)
         default_extensions = [
             "jinja2_ansible_filters.AnsibleCoreFiltersExtension",

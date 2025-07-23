@@ -600,8 +600,26 @@ class Template:
         return bool(self.config_data.get("preserve_symlinks", False))
 
     @cached_property
-    def local_abspath(self) -> Path:
-        """Get the absolute path to the template on disk.
+    def shared_lib_abspath(self) -> Optional[Path]:
+        shared_lib_path = self.config_data.get("shared_lib", None)
+        if shared_lib_path is None:
+            return None
+        shared_lib_path = str(shared_lib_path)
+        local_abspath = self.local_abspath
+        result = local_abspath / shared_lib_path
+        result = result.resolve()
+
+        if self.vcs == "git" and not result.is_relative_to(self._local_root_abspath):
+            raise ValueError(
+                "Shared library path must be a directory within the same git repository to prevent directory "
+                "traversal attacks."
+            )
+
+        return result
+
+    @cached_property
+    def _local_root_abspath(self) -> Path:
+        """Get the absolute path to the root folder on disk.
 
         This may clone it if `url` points to a VCS-tracked template.
         Dirty changes for local VCS-tracked templates will be copied.
@@ -611,9 +629,22 @@ class Template:
             result = Path(clone(self.url_expanded, self.ref))
             if self.ref is None:
                 checkout_latest_tag(result, self.use_prereleases)
-            # Include subfolder if present
-            if self.repo_sub_folder:
-                result = result / self.repo_sub_folder
+        if not result.is_dir():
+            raise ValueError("Local template root must be a directory.")
+        with suppress(OSError):
+            result = result.resolve()
+        return result
+
+    @cached_property
+    def local_abspath(self) -> Path:
+        """Get the absolute path to the template on disk.
+
+        This may clone it if `url` points to a VCS-tracked template.
+        Dirty changes for local VCS-tracked templates will be copied.
+        """
+        result = self._local_root_abspath
+        if self.vcs == "git" and self.repo_sub_folder:
+            result = result / self.repo_sub_folder
         if not result.is_dir():
             raise ValueError("Local template must be a directory.")
         with suppress(OSError):
