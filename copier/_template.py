@@ -11,7 +11,7 @@ from dataclasses import field
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 from shutil import rmtree
-from typing import Any, Literal
+from typing import Any, Callable, Literal, Optional
 from warnings import warn
 
 import dunamai
@@ -22,7 +22,7 @@ from packaging.version import Version, parse
 from plumbum.machines import local
 from pydantic.dataclasses import dataclass
 
-from ._tools import copier_version, handle_remove_readonly
+from ._tools import copier_version, handle_remove_readonly, parse_dpath_path
 from ._types import AnyByStrDict, VCSTypes
 from ._vcs import checkout_latest_tag, clone, get_git, get_repo
 from .errors import (
@@ -57,10 +57,19 @@ def filter_config(data: AnyByStrDict) -> tuple[AnyByStrDict, AnyByStrDict]:
             config_data[k[1:]] = v
         else:
             # Transform simplified questions format into complex
-            if not isinstance(v, dict):
-                v = {"default": v}
-            questions_data[k] = v
+            questions_data[k] = _normalize_question_data(v)
     return config_data, questions_data
+
+
+def _normalize_question_data(q: Any) -> dict[str, Any]:
+    """Normalize question data to ensure it has a dictionary structure."""
+    if not isinstance(q, dict):
+        return {"default": q}
+    if q.get("type", "yaml") == "dict":
+        subq = q.get("items", {})
+        for k, v in subq.items():
+            q["items"][k] = _normalize_question_data(v)
+    return q
 
 
 def load_template_config(conf_path: Path, quiet: bool = False) -> AnyByStrDict:
@@ -378,6 +387,18 @@ class Template:
             result["_commit"] = self.commit
         return result
 
+    @cached_property
+    def validation_msg_format(self) -> str:
+        """Get the format for validation error messages.
+
+        This is used to format validation errors for questions.
+        Defaults to `Validation error for question '{var_name}': {err_msg}`
+        """
+        return self.config_data.get(
+            "validation_msg_format",
+            "Validation error for question '{var_name}': {err_msg}",
+        )
+
     def migration_tasks(
         self, stage: Literal["before", "after"], from_template: Template
     ) -> Sequence[Task]:
@@ -476,17 +497,42 @@ class Template:
                 result[key]["secret"] = True
         return result
 
-    @cached_property
-    def secret_questions(self) -> set[str]:
-        """Get names of secret questions from the template.
+    def question_by_answer_key(
+        self, answer_key: str, *filters: Callable[[AnyByStrDict], bool]
+    ) -> Optional[AnyByStrDict]:
+        """Get a question by its answer key.
 
-        These questions shouldn't be saved into the answers file.
+        Args:
+            answer_key: The key of the answer to find the question for.
+            filters: Optional filters to apply to the question data.
+
+        Returns:
+            The question data if found, or `None` if not found.
         """
-        result = set(self.config_data.get("secret_questions", []))
-        for key, value in self.questions_data.items():
-            if value.get("secret"):
-                result.add(key)
-        return result
+        answer_paths = parse_dpath_path(answer_key)
+        questions = self.questions_data
+        q: Optional[AnyByStrDict] = None
+        for i, p in enumerate(answer_paths):
+            if i == 0:
+                if p not in questions:
+                    return None
+                q = questions[p]
+                continue
+            if p.isdigit() and q is not None and q.get("size", None) is not None:
+                continue
+            questions = (
+                q["items"] if q is not None and q.get("type", "yaml") == "dict" else {}
+            )
+            if p not in questions:
+                return None
+            q = questions[p]
+
+        if q is not None:
+            for filter_func in filters:
+                if not filter_func(q):
+                    return None
+
+        return q
 
     @cached_property
     def skip_if_exists(self) -> Sequence[str]:
@@ -554,8 +600,26 @@ class Template:
         return bool(self.config_data.get("preserve_symlinks", False))
 
     @cached_property
-    def local_abspath(self) -> Path:
-        """Get the absolute path to the template on disk.
+    def shared_lib_abspath(self) -> Optional[Path]:
+        shared_lib_path = self.config_data.get("shared_lib", None)
+        if shared_lib_path is None:
+            return None
+        shared_lib_path = str(shared_lib_path)
+        local_abspath = self.local_abspath
+        result = local_abspath / shared_lib_path
+        result = result.resolve()
+
+        if self.vcs == "git" and not result.is_relative_to(self._local_root_abspath):
+            raise ValueError(
+                "Shared library path must be a directory within the same git repository to prevent directory "
+                "traversal attacks."
+            )
+
+        return result
+
+    @cached_property
+    def _local_root_abspath(self) -> Path:
+        """Get the absolute path to the root folder on disk.
 
         This may clone it if `url` points to a VCS-tracked template.
         Dirty changes for local VCS-tracked templates will be copied.
@@ -565,6 +629,22 @@ class Template:
             result = Path(clone(self.url_expanded, self.ref))
             if self.ref is None:
                 checkout_latest_tag(result, self.use_prereleases)
+        if not result.is_dir():
+            raise ValueError("Local template root must be a directory.")
+        with suppress(OSError):
+            result = result.resolve()
+        return result
+
+    @cached_property
+    def local_abspath(self) -> Path:
+        """Get the absolute path to the template on disk.
+
+        This may clone it if `url` points to a VCS-tracked template.
+        Dirty changes for local VCS-tracked templates will be copied.
+        """
+        result = self._local_root_abspath
+        if self.vcs == "git" and self.repo_sub_folder:
+            result = result / self.repo_sub_folder
         if not result.is_dir():
             raise ValueError("Local template must be a directory.")
         with suppress(OSError):
@@ -580,6 +660,26 @@ class Template:
         property returns the expanded version, which should work properly.
         """
         return get_repo(self.url) or self.url
+
+    @cached_property
+    def repo_sub_folder(self) -> str | None:
+        """Get the subfolder inside the repository, if any.
+
+        This is used to determine the subfolder inside the repository that
+        contains the template code. If the template is not a VCS-tracked
+        template, this will return `None`.
+        """
+        if self.vcs == "git" and "::" in self.url:
+            subfolder = self.url.rsplit("::", 1)[1]
+            if ".." in subfolder:
+                raise ValueError(
+                    "Subfolder in the URL cannot contain '..' to prevent directory "
+                    "traversal attacks."
+                )
+            if subfolder.startswith("/"):
+                return subfolder[1:]  # Remove leading slash
+            return subfolder
+        return None
 
     @cached_property
     def version(self) -> Version | None:

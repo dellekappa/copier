@@ -12,7 +12,23 @@ env:
 jobs:
   build:
     name: Build project for distribution
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            executable_ext: ""
+            build_python_package: true
+          - os: windows-latest
+            platform: windows
+            executable_ext: ".exe"
+            build_python_package: false
+          - os: macos-latest
+            platform: macos
+            executable_ext: ""
+            build_python_package: false
 
     steps:
       - uses: actions/checkout@v4
@@ -24,9 +40,15 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --dev
+
       # See https://peps.python.org/pep-0440/#local-version-identifiers
       - name: Omit local version for publishing to test.pypi.org
-        if: github.ref == 'refs/heads/master'
+        if: matrix.build_python_package && github.ref == 'refs/heads/master'
         # HACK: https://github.com/ofek/hatch-vcs/issues/43
         run: |
           cat << EOF >> pyproject.toml
@@ -36,20 +58,43 @@ jobs:
           EOF
 
       - name: Build project for distribution
+        if: matrix.build_python_package
         run: uv build
 
       - name: Upload artifact containing distribution files
+        if: matrix.build_python_package
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
           if-no-files-found: error
 
+      - name: Build executable
+        run: uv run poe build
+
+      - name: Rename executable with platform suffix
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            mv dist/copier.exe dist/copier-${{ matrix.platform }}.exe
+          else
+            mv dist/copier dist/copier-${{ matrix.platform }}
+          fi
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: copier-${{ matrix.platform }}
+          path: dist/copier-${{ matrix.platform }}${{ matrix.executable_ext }}
+          retention-days: 1
+
   publish-test:
     name: Publish package distributions to test.pypi.org
     runs-on: ubuntu-latest
     needs: [build]
-    if: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
+    if:
+      ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') &&
+      !endsWith(github.ref, '+dev')}}
     environment:
       name: pypi-test
       url: https://test.pypi.org/p/copier
@@ -73,7 +118,7 @@ jobs:
     name: Publish package distributions to pypi.org
     runs-on: ubuntu-latest
     needs: [publish-test]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !endsWith(github.ref, '+dev') }}
     environment:
       name: pypi
       url: https://pypi.org/p/copier
@@ -91,3 +136,31 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  release:
+    name: Create GitHub release with executables
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all executable artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: copier-*
+
+      - name: Create release with executables
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/copier-linux/copier-linux
+            artifacts/copier-windows/copier-windows.exe
+            artifacts/copier-macos/copier-macos
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

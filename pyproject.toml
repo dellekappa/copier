@@ -19,6 +19,7 @@ authors = [{ name = "Ben Felder", email = "ben@felder.io" }]
 readme = "README.md"
 dependencies = [
   "colorama>=0.4.6",
+  "dpath>=2.2.0",
   "dunamai>=1.7.0",
   "funcy>=1.17",
   "jinja2>=3.1.5",
@@ -51,6 +52,7 @@ dev = [
   "pexpect==4.9.0",
   "poethepoet==0.36.0",
   "pre-commit==4.2.0",
+  "pyinstaller==6.14.2",
   "pytest==8.4.1",
   "pytest-cov==6.2.1",
   "pytest-gitconfig==0.7.0",
@@ -92,6 +94,10 @@ help = "run tests"
 [tool.poe.tasks.types]
 cmd = "mypy ."
 help = "run the type (mypy) checker on the codebase"
+
+[tool.poe.tasks.build]
+cmd = "uv run pyinstaller --onefile --name=copier --distpath=dist --workpath=build --specpath=build --add-data=copier:copier --hidden-import=jinja2_ansible_filters --clean run.py"
+help = "build executable with PyInstaller"
 
 [tool.ruff.lint]
 extend-select = [

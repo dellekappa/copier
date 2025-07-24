@@ -34,7 +34,7 @@ from plumbum.machines import local
 from pydantic import ConfigDict, PositiveInt
 from pydantic.dataclasses import dataclass
 from pydantic_core import to_jsonable_python
-from questionary import confirm, unsafe_prompt
+from questionary import confirm
 
 from ._jinja_ext import YieldEnvironment, YieldExtension
 from ._subproject import Subproject
@@ -50,7 +50,6 @@ from ._tools import (
     set_git_alternates,
 )
 from ._types import (
-    MISSING,
     AnyByStrDict,
     AnyByStrMutableMapping,
     JSONSerializable,
@@ -62,10 +61,15 @@ from ._types import (
     StrOrPath,
     VcsRef,
 )
-from ._user_data import AnswersMap, Question, load_answersfile_data
+from ._user_data import (
+    AnswersMap,
+    GlobalState,
+    QuestionNode,
+    load_answersfile_data,
+    write_answers_to_dict,
+)
 from ._vcs import get_git
 from .errors import (
-    CopierAnswersInterrupt,
     ExtensionNotFoundError,
     InteractiveSessionError,
     TaskError,
@@ -343,8 +347,11 @@ class Worker:
             for (k, v) in self.answers.combined.items()
             if not k.startswith("_")
             and k not in self.answers.hidden
-            and k not in self.template.secret_questions
-            and k in self.template.questions_data
+            # and k not in self.template.secret_questions
+            and self.template.question_by_answer_key(
+                k, lambda q: not q.get("secret", False)
+            )
+            is not None
             and isinstance(k, JSONSerializable)
             and isinstance(v, JSONSerializable)
         )
@@ -424,8 +431,9 @@ class Worker:
                 "os": lambda: OS,
             }
         )
+
         return dict(
-            **self.answers.combined,
+            **write_answers_to_dict(self.answers.combined, {}),
             _copier_answers=self._answers_to_remember(),
             _copier_conf=conf,
             _folder_name=self.subproject.local_abspath.name,
@@ -545,69 +553,19 @@ class Worker:
             external=self._external_data(),
         )
 
-        for var_name, details in self.template.questions_data.items():
-            question = Question(
-                answers=self.answers,
-                context=self._render_context(),
-                jinja_env=self.jinja_env,
-                settings=self.settings,
-                var_name=var_name,
-                **details,
-            )
-            # Delete last answer if it cannot be parsed or validated, so a new
-            # valid answer can be provided.
-            if var_name in self.answers.last:
-                try:
-                    answer = question.parse_answer(self.answers.last[var_name])
-                    question.validate_answer(answer)
-                except Exception:
-                    del self.answers.last[var_name]
-            # Skip a question when the skip condition is met.
-            if not question.get_when():
-                # Omit its answer from the answers file.
-                self.answers.hide(var_name)
-                # Delete last answers to re-compute the answer from the default
-                # value (if it exists).
-                if var_name in self.answers.last:
-                    del self.answers.last[var_name]
-                # Skip immediately to the next question when it has no default
-                # value.
-                if question.default is MISSING:
-                    continue
-            if var_name in self.answers.init:
-                # Try to parse and validate (if the question has a validator)
-                # the answer value.
-                answer = question.parse_answer(self.answers.init[var_name])
-                question.validate_answer(answer)
-                # At this point, the answer value is valid. Do not ask the
-                # question again, but set answer as the user's answer instead.
-                self.answers.user[var_name] = answer
-                continue
-            # Skip a question when the user already answered it.
-            if self.skip_answered and var_name in self.answers.last:
-                continue
+        state = GlobalState(
+            _context_renderer=self._render_context,
+            template=self.template,
+            answers=self.answers,
+            jinja_env=self.jinja_env,
+            settings=self.settings,
+            defaults=self.defaults,
+            skip_answered=self.skip_answered,
+        )
 
-            # Display TUI and ask user interactively only without --defaults
-            try:
-                if self.defaults:
-                    new_answer = question.get_default()
-                    if new_answer is MISSING:
-                        raise ValueError(f'Question "{var_name}" is required')
-                else:
-                    try:
-                        new_answer = unsafe_prompt(
-                            [question.get_questionary_structure()],
-                            answers={question.var_name: question.get_default()},
-                        )[question.var_name]
-                    except EOFError as err:
-                        raise InteractiveSessionError(
-                            "Use `--defaults` and/or `--data`/`--data-file`"
-                        ) from err
-            except KeyboardInterrupt as err:
-                raise CopierAnswersInterrupt(
-                    self.answers, question, self.template
-                ) from err
-            self.answers.user[var_name] = new_answer
+        for question_name, details in self.template.questions_data.items():
+            node = QuestionNode(question_name, details, state)
+            node.process()
 
         # Reload external data, which may depend on answers
         self.answers.external = self._external_data()
@@ -643,6 +601,14 @@ class Worker:
         Respects template settings.
         """
         paths = [str(self.template.local_abspath)]
+
+        if self.template.shared_lib_abspath is not None:
+            shared_lib_path = str(self.template.shared_lib_abspath)
+            paths.append(shared_lib_path)
+            sys.path.append(
+                shared_lib_path
+            ) if shared_lib_path not in sys.path else None
+
         loader = FileSystemLoader(paths)
         default_extensions = [
             "jinja2_ansible_filters.AnsibleCoreFiltersExtension",

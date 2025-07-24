@@ -136,6 +136,26 @@ def test_settings_from_utf_file(
         ("https://github.com/user/repo.git", {"https://github.com/user"}, False),
         ("https://github.com/user/repo.git", {"https://github.com/"}, True),
         ("https://github.com/user/repo.git", {"https://github.com"}, False),
+        (
+            "https://github.com/user/repo.git::path",
+            {"https://github.com/user/repo.git::path"},
+            True,
+        ),
+        (
+            "https://github.com/user/repo.git::path/subpath",
+            {"https://github.com/user/repo.git::path/"},
+            True,
+        ),
+        (
+            "https://github.com/user/repo.git::path",
+            {"https://github.com/user/repo.git"},
+            True,
+        ),
+        (
+            "https://github.com/user/repo.git",
+            {"https://github.com/user/repo.git::path"},
+            False,
+        ),
         (f"{Path.home()}/template", set(), False),
         (f"{Path.home()}/template", {f"{Path.home()}/template"}, True),
         (f"{Path.home()}/template", {"~/template"}, True),
