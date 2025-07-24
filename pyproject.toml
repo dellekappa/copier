@@ -96,7 +96,7 @@ cmd = "mypy ."
 help = "run the type (mypy) checker on the codebase"
 
 [tool.poe.tasks.build]
-cmd = "uv run pyinstaller --onefile --name=copier --distpath=dist --workpath=build --specpath=build --add-data=copier:copier --hidden-import=jinja2_ansible_filters --clean main.py"
+cmd = "uv run pyinstaller --onefile --name=copier --distpath=dist --workpath=build --specpath=build --add-data=copier:copier --hidden-import=jinja2_ansible_filters --clean run.py"
 help = "build executable with PyInstaller"
 
 [tool.ruff.lint]

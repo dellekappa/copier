@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # Add the current directory to the Python path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append(str(Path.cwd()))
 
 from copier._cli import CopierApp
 
