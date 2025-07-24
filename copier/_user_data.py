@@ -386,13 +386,18 @@ class QuestionNode:
                     raise ValueError(f'Question "{question.var_name}" is required')
             else:
                 try:
+                    def_value = question.get_default()
                     new_answer = unsafe_prompt(
                         [
                             question.get_questionary_structure(
                                 self._get_prompt_padding()
                             )
                         ],
-                        answers={question.var_name: question.get_default()},
+                        answers={
+                            question.var_name: def_value
+                            if def_value is not MISSING
+                            else None
+                        },
                     )[question.var_name]
                 except EOFError as err:
                     raise InteractiveSessionError(
