@@ -578,36 +578,6 @@ class Question:
                         return MISSING
                     if result is MISSING:
                         return MISSING
-                    if (
-                        self.get_type_name() == "str"
-                        and result == ""
-                        and self.default != ""
-                    ):
-                        # If the rendering returns an empty string, it means
-                        # no default value
-                        return MISSING
-
-                    # if result is MISSING:
-                    #     return MISSING
-
-                    # if self.default is MISSING:
-                    #     return MISSING
-                    #
-                    # with warnings.catch_warnings():
-                    #     warnings.simplefilter("ignore", MissingFileWarning)
-                    #     result = self.render_value(
-                    #         self.state.settings.defaults.get(
-                    #             self.var_name, self.default
-                    #         )
-                    #     )
-                    # if (
-                    #     self.get_type_name() == "str"
-                    #     and result == ""
-                    #     and self.default != ""
-                    # ):
-                    #     # If the rendering returns an empty string,
-                    #     # it means no default value
-                    #     return MISSING
         result = self.parse_answer(result)
         # Computed values (i.e., `when: false`) are intentionally not validated
         # at the moment.
