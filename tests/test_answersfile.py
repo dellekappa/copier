@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from textwrap import dedent
 
@@ -41,6 +40,45 @@ def template_path(tmp_path_factory: pytest.TempPathFactory) -> str:
                 password_2:
                     secret: yes
                     default: password two
+
+                list:
+                    type: str
+                    size: 3
+                    default: "element #[[ _idx + 1 ]]"
+
+                group:
+                    type: dict
+                    items:
+                        one:
+                            type: str
+                            default: one
+                        subgroup:
+                            type: dict
+                            items:
+                                one:
+                                    type: str
+                                    default: "group.one value is [[ group.one ]]"
+                                two:
+                                    type: str
+                                    default: "subgroup.two"
+                        three:
+                            type: str
+                            default: "group.one value is [[ group['one'] ]] and group.subgroup.two value is [[ group.subgroup['two'] ]]"
+
+                group_list:
+                    type: dict
+                    size: 3
+                    items:
+                        one:
+                            type: int
+                            default: "[[ _idx + 1 ]]"
+                        subgroup:
+                            type: dict
+                            size: "[[group_list[_idx].one]]"
+                            items:
+                                one:
+                                    type: str
+                                    default: "subgroup.one element #[[ _idx + 1 ]]"
                 """
             ),
             (root / "round.txt.tmpl"): (
@@ -48,6 +86,14 @@ def template_path(tmp_path_factory: pytest.TempPathFactory) -> str:
                 It's the [[round]] round.
                 password_1=[[password_1]]
                 password_2=[[password_2]]
+                list=[[list|join(", ")]]
+                one=[[group.one]]
+                subgroup_one=[[group['subgroup']['one']]]
+                subgroup_two=[[group.subgroup.two]]
+                three=[[group.three]]
+                group_list_1_one=[[group_list[1].one]]
+                group_list_1_subgroup_one=[[group_list[1].subgroup|map(attribute='one')|join(", ")]]
+                group_list_2_subgroup_1_one=[[group_list[2].subgroup[1].one]]
                 """
             ),
         }
@@ -78,6 +124,14 @@ def test_answersfile(
             It's the 1st round.
             password_1=password one
             password_2=password two
+            list=element #1, element #2, element #3
+            one=one
+            subgroup_one=group.one value is one
+            subgroup_two=subgroup.two
+            three=group.one value is one and group.subgroup.two value is subgroup.two
+            group_list_1_one=2
+            group_list_1_subgroup_one=subgroup.one element #1, subgroup.one element #2
+            group_list_2_subgroup_1_one=subgroup.one element #2
             """
         ).lstrip()
     )
@@ -85,12 +139,36 @@ def test_answersfile(
     assert log["round"] == "1st"
     assert "password_1" not in log
     assert "password_2" not in log
+    assert log["list.0"] == "element #1"
+    assert log["list.1"] == "element #2"
+    assert log["list.2"] == "element #3"
+    assert log["group.one"] == "one"
+    assert log["group.subgroup.one"] == "group.one value is one"
+    assert log["group.subgroup.two"] == "subgroup.two"
+    assert (
+        log["group.three"]
+        == "group.one value is one and group.subgroup.two value is subgroup.two"
+    )
+    assert log["group_list.0.one"] == 1
+    assert log["group_list.1.one"] == 2
+    assert log["group_list.2.one"] == 3
+    assert log["group_list.0.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.1.one"] == "subgroup.one element #2"
+    assert log["group_list.2.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.2.subgroup.1.one"] == "subgroup.one element #2"
+    assert log["group_list.2.subgroup.2.one"] == "subgroup.one element #3"
 
     # Check 2nd round is properly executed and remembered
     copier.run_copy(
         template_path,
         tmp_path,
-        {"round": "2nd"},
+        {
+            "round": "2nd",
+            "list.1": "custom element #2",
+            "group.three": "custom level three",
+            "group_list.2.subgroup.1.one": "custom subgroup.one element #2",
+        },
         answers_file=answers_file,
         defaults=True,
         overwrite=True,
@@ -102,6 +180,14 @@ def test_answersfile(
             It's the 2nd round.
             password_1=password one
             password_2=password two
+            list=element #1, custom element #2, element #3
+            one=one
+            subgroup_one=group.one value is one
+            subgroup_two=subgroup.two
+            three=custom level three
+            group_list_1_one=2
+            group_list_1_subgroup_one=subgroup.one element #1, subgroup.one element #2
+            group_list_2_subgroup_1_one=custom subgroup.one element #2
             """
         ).lstrip()
     )
@@ -109,6 +195,22 @@ def test_answersfile(
     assert log["round"] == "2nd"
     assert "password_1" not in log
     assert "password_2" not in log
+    assert log["list.0"] == "element #1"
+    assert log["list.1"] == "custom element #2"
+    assert log["list.2"] == "element #3"
+    assert log["group.one"] == "one"
+    assert log["group.subgroup.one"] == "group.one value is one"
+    assert log["group.subgroup.two"] == "subgroup.two"
+    assert log["group.three"] == "custom level three"
+    assert log["group_list.0.one"] == 1
+    assert log["group_list.1.one"] == 2
+    assert log["group_list.2.one"] == 3
+    assert log["group_list.0.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.1.one"] == "subgroup.one element #2"
+    assert log["group_list.2.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.2.subgroup.1.one"] == "custom subgroup.one element #2"
+    assert log["group_list.2.subgroup.2.one"] == "subgroup.one element #3"
 
     # Check repeating 2nd is properly executed and remembered
     copier.run_copy(
@@ -125,6 +227,14 @@ def test_answersfile(
             It's the 2nd round.
             password_1=password one
             password_2=password two
+            list=element #1, custom element #2, element #3
+            one=one
+            subgroup_one=group.one value is one
+            subgroup_two=subgroup.two
+            three=custom level three
+            group_list_1_one=2
+            group_list_1_subgroup_one=subgroup.one element #1, subgroup.one element #2
+            group_list_2_subgroup_1_one=custom subgroup.one element #2
             """
         ).lstrip()
     )
@@ -132,6 +242,22 @@ def test_answersfile(
     assert log["round"] == "2nd"
     assert "password_1" not in log
     assert "password_2" not in log
+    assert log["list.0"] == "element #1"
+    assert log["list.1"] == "custom element #2"
+    assert log["list.2"] == "element #3"
+    assert log["group.one"] == "one"
+    assert log["group.subgroup.one"] == "group.one value is one"
+    assert log["group.subgroup.two"] == "subgroup.two"
+    assert log["group.three"] == "custom level three"
+    assert log["group_list.0.one"] == 1
+    assert log["group_list.1.one"] == 2
+    assert log["group_list.2.one"] == 3
+    assert log["group_list.0.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.1.subgroup.1.one"] == "subgroup.one element #2"
+    assert log["group_list.2.subgroup.0.one"] == "subgroup.one element #1"
+    assert log["group_list.2.subgroup.1.one"] == "custom subgroup.one element #2"
+    assert log["group_list.2.subgroup.2.one"] == "subgroup.one element #3"
 
 
 def test_external_data(tmp_path_factory: pytest.TempPathFactory) -> None:
@@ -295,11 +421,7 @@ def test_external_data_with_unicode_characters(
 
     with monkeypatch.context() as m:
         # Override the factor that determines the default encoding when opening files.
-        if sys.version_info >= (3, 10):
-            m.setattr("io.text_encoding", lambda *_args: "cp932")
-        else:
-            m.setattr("_bootlocale.getpreferredencoding", lambda *_args: "cp932")
-
+        m.setattr("io.text_encoding", lambda *_args: "cp932")
         copier.run_copy(str(src), dst, defaults=True, overwrite=True)
 
     answers = load_answersfile_data(dst)
