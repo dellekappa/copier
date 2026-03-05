@@ -10,6 +10,7 @@ from . import _main
 from ._deprecation import deprecate_member_as_internal
 from ._settings import Settings, load_settings
 from ._types import Phase, VcsRef
+from .errors import QuestionPending
 
 if TYPE_CHECKING:
     from ._main import *  # noqa: F403
@@ -35,6 +36,7 @@ __all__ = [
     "run_copy",  # noqa: F405
     "run_recopy",  # noqa: F405
     "run_update",  # noqa: F405,
+    "QuestionPending",
     "Phase",
     "Settings",
     "VcsRef",

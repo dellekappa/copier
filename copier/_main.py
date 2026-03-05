@@ -67,6 +67,9 @@ from ._types import (
 from ._user_data import (
     AnswersMap,
     GlobalState,
+    InteractiveUI,
+    ProgrammaticUI,
+    QuestionnaireUI,
     QuestionNode,
     load_answersfile_data,
     write_answers_to_dict,
@@ -254,9 +257,17 @@ class Worker:
     unsafe: bool = False
     skip_answered: bool = False
     skip_tasks: bool = False
+    mode: Literal["interactive", "programmatic"] = "interactive"
 
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
+
+    @property
+    def _ui(self) -> QuestionnaireUI:
+        """Resolve the questionnaire UI strategy from the mode."""
+        if self.mode == "programmatic":
+            return ProgrammaticUI()
+        return InteractiveUI()
 
     def __enter__(self) -> Worker:
         """Allow using worker as a context manager."""
@@ -560,7 +571,7 @@ class Worker:
         Uses a replay loop: the tree walk raises QuestionPending when it
         reaches a question that needs an answer. The loop delegates to the
         active UI (interactive or programmatic) and replays from the start.
-        Previously answered questions are skipped via answers.init.
+        Previously answered questions are skipped via answers.user.
         """
         self.answers = AnswersMap(
             user_defaults=self.user_defaults,
@@ -578,6 +589,7 @@ class Worker:
             settings=self.settings,
             defaults=self.defaults,
             skip_answered=self.skip_answered,
+            ui=self._ui,
         )
 
         while True:
@@ -1507,6 +1519,7 @@ def run_copy(
     quiet: bool = False,
     unsafe: bool = False,
     skip_tasks: bool = False,
+    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Copy a template to a destination, from zero."""
     with Worker(
@@ -1535,6 +1548,7 @@ def run_copy(
         quiet=quiet,
         unsafe=unsafe,
         skip_tasks=skip_tasks,
+        mode=mode,
     ) as worker:
         worker.run_copy()
     return worker
@@ -1559,6 +1573,7 @@ def run_recopy(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
+    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Update a subproject from its template, discarding subproject evolution."""
     with Worker(
@@ -1587,6 +1602,7 @@ def run_recopy(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
+        mode=mode,
     ) as worker:
         worker.run_recopy()
     return worker
@@ -1613,6 +1629,7 @@ def run_update(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
+    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Update a subproject, from its template."""
     with Worker(
@@ -1643,6 +1660,7 @@ def run_update(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
+        mode=mode,
     ) as worker:
         worker.run_update()
     return worker
