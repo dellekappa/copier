@@ -192,7 +192,20 @@ class ProgrammaticUI:
 
         This interrupts the tree walk so the external caller can provide
         the answer and replay.
+
+        When a question's ``when`` condition is false but it has a default
+        value, the tree walk still reaches ``_ask_question`` (because the
+        interactive UI relies on questionary's ``when`` lambda to silently
+        return the default). We replicate that behaviour here by returning
+        the cast default instead of raising QuestionPending.
         """
+        # Mirror questionary's when-lambda: skip silently when condition is false
+        if not question.get_when():
+            default = question.get_default()
+            if default is not MISSING:
+                return question.cast_answer(default)
+            return None
+
         question_info: dict[str, Any] = {
             "var_name": question.var_name,
             "type": question.get_type_name(),
@@ -287,6 +300,7 @@ class GlobalState:
     template: Template
     answers: AnswersMap
     jinja_env: SandboxedEnvironment
+    ui: QuestionnaireUI = field(default_factory=InteractiveUI)
     settings: SettingsModel = field(default_factory=SettingsModel)
     defaults: bool = False
     skip_answered: bool = False
@@ -441,17 +455,8 @@ class QuestionNode:
             if "help" in self.config:
                 message = self._render_value(self.config["help"])
 
-            # Show the help message for the dictionary
-            unsafe_prompt(
-                [
-                    {
-                        "type": "print",
-                        "message": f"{self._get_prompt_padding()} ▷ {message}",
-                        "when": lambda _: self._get_when(),
-                    }
-                ],
-                style="bold",
-            )
+            if self._get_when():
+                self.state.ui.show_group_message(message, self.level)
 
         for name, config in self.config["items"].items():
             node = QuestionNode(
@@ -518,30 +523,12 @@ class QuestionNode:
     def _ask_question(self, question: Question) -> None:
         """Ask the question to the user and store the answer."""
         try:
-            # Handle getting an answer
             if self.state.defaults:
                 new_answer = question.get_default()
                 if new_answer is MISSING:
                     raise ValueError(f'Question "{question.var_name}" is required')
             else:
-                try:
-                    def_value = question.get_default()
-                    new_answer = unsafe_prompt(
-                        [
-                            question.get_questionary_structure(
-                                self._get_prompt_padding()
-                            )
-                        ],
-                        answers={
-                            question.var_name: def_value
-                            if def_value is not MISSING
-                            else None
-                        },
-                    )[question.var_name]
-                except EOFError as err:
-                    raise InteractiveSessionError(
-                        "Use `--defaults` and/or `--data`/`--data-file`"
-                    ) from err
+                new_answer = self.state.ui.ask_question(question, self.level)
 
         except KeyboardInterrupt as err:
             raise CopierAnswersInterrupt(
@@ -554,9 +541,6 @@ class QuestionNode:
         if "when" not in self.config:
             return True
         return cast_to_bool(self._render_value(self.config["when"]))
-
-    def _get_prompt_padding(self) -> str:
-        return " " * (self.level * 2) + " " if self.level else ""
 
     def _render_value(self, value: Any) -> Any:
         """Render a value using the worker's Jinja environment."""
