@@ -118,6 +118,49 @@ class QuestionnaireUI(Protocol):
         ...
 
 
+class InteractiveUI:
+    """Terminal-based questionnaire UI using questionary.
+
+    This is the default implementation of QuestionnaireUI, preserving
+    the existing interactive behavior of Copier.
+    """
+
+    @staticmethod
+    def _level_to_padding(level: int) -> str:
+        return " " * (level * 2) + " " if level else ""
+
+    def ask_question(self, question: Question, level: int = 0) -> Any:
+        """Prompt the user interactively via questionary and return the answer."""
+        padding = self._level_to_padding(level)
+        def_value = question.get_default()
+        try:
+            new_answer = unsafe_prompt(
+                [question.get_questionary_structure(padding)],
+                answers={
+                    question.var_name: def_value if def_value is not MISSING else None
+                },
+            )[question.var_name]
+        except EOFError as err:
+            raise InteractiveSessionError(
+                "Use `--defaults` and/or `--data`/`--data-file`"
+            ) from err
+        return new_answer
+
+    def show_group_message(self, message: str, level: int = 0) -> None:
+        """Print a group header message to the terminal."""
+        padding = self._level_to_padding(level)
+        unsafe_prompt(
+            [
+                {
+                    "type": "print",
+                    "message": f"{padding} ▷ {message}",
+                    "when": lambda _: True,
+                }
+            ],
+            style="bold",
+        )
+
+
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class AnswersMap:
     """Object that gathers answers from different sources.
