@@ -244,18 +244,30 @@ class SettingsError(CopierError):
 
 
 class QuestionPending(CopierError):
-    """Raised by ProgrammaticUI to interrupt the tree walk at an unanswered question.
+    """Raised to interrupt the tree walk at an unanswered question.
 
     This is a control flow mechanism, not an error. When QuestionNode.process()
-    reaches the first question that needs an external answer, ProgrammaticUI's
-    ask_question() raises this exception carrying the question metadata.
-    The caller catches it, provides the answer into the answers map, and
-    replays the tree walk — previously answered questions are skipped.
+    reaches a question that needs an answer, _ask_question() raises this
+    exception carrying the question metadata and a reference to the Question
+    object. The Worker replay loop catches it and delegates to the active UI:
+
+    - InteractiveUI prompts the user and returns the answer.
+    - ProgrammaticUI re-raises it to the external caller (MCP server).
 
     Attributes:
         question_info: Dict with question metadata (var_name, type, choices, etc.)
+        question: The internal Question object (for the UI to use).
+        level: The nesting depth of the question in the tree.
     """
 
-    def __init__(self, question_info: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        question_info: dict[str, Any],
+        *,
+        question: Any = None,
+        level: int = 0,
+    ) -> None:
         self.question_info = question_info
+        self.question = question
+        self.level = level
         super().__init__(f"Question pending: {question_info.get('var_name', '?')}")

@@ -157,10 +157,10 @@ def _collect_questions_via_replay(
             questions_asked.append(qp.question_info)
             var_name = qp.question_info["var_name"]
             if var_name in answers:
-                state.answers.init[var_name] = answers[var_name]
+                state.answers.user[var_name] = answers[var_name]
             else:
                 # Use default
-                state.answers.init[var_name] = qp.question_info["default"]
+                state.answers.user[var_name] = qp.question_info["default"]
 
     return questions_asked
 
@@ -225,8 +225,8 @@ def test_replay_with_custom_answers(
         questions = _collect_questions_via_replay(state, custom)
 
         assert len(questions) == 3
-        assert state.answers.init["project_name"] == "custom-name"
-        assert state.answers.init["version"] == "2.0.0"
+        assert state.answers.user["project_name"] == "custom-name"
+        assert state.answers.user["version"] == "2.0.0"
 
 
 # -- Conditional questions --

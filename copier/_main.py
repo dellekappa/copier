@@ -73,9 +73,11 @@ from ._user_data import (
 )
 from ._vcs import get_git
 from .errors import (
+    CopierAnswersInterrupt,
     ExtensionNotFoundError,
     ForbiddenPathError,
     InteractiveSessionError,
+    QuestionPending,
     TaskError,
     UnsafeTemplateError,
     UserMessageError,
@@ -553,7 +555,13 @@ class Worker:
         return self._solve_render_conflict(dst_relpath)
 
     def _ask(self) -> None:  # noqa: C901
-        """Ask the questions of the questionnaire and record their answers."""
+        """Ask the questions of the questionnaire and record their answers.
+
+        Uses a replay loop: the tree walk raises QuestionPending when it
+        reaches a question that needs an answer. The loop delegates to the
+        active UI (interactive or programmatic) and replays from the start.
+        Previously answered questions are skipped via answers.init.
+        """
         self.answers = AnswersMap(
             user_defaults=self.user_defaults,
             init=self.data,
@@ -572,9 +580,20 @@ class Worker:
             skip_answered=self.skip_answered,
         )
 
-        for question_name, details in self.template.questions_data.items():
-            node = QuestionNode(question_name, details, state)
-            node.process()
+        while True:
+            try:
+                for question_name, details in self.template.questions_data.items():
+                    node = QuestionNode(question_name, details, state)
+                    node.process()
+                break  # All questions answered
+            except QuestionPending as qp:
+                try:
+                    answer = state.ui.ask_question(qp.question, qp.level)
+                except KeyboardInterrupt as err:
+                    raise CopierAnswersInterrupt(
+                        state.answers, qp.question, state.template
+                    ) from err
+                state.answers.user[qp.question_info["var_name"]] = answer
 
         # Reload external data, which may depend on answers
         self.answers.external = self._external_data()

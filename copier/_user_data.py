@@ -43,7 +43,6 @@ from ._types import (
     StrOrPath,
 )
 from .errors import (
-    CopierAnswersInterrupt,
     InteractiveSessionError,
     InvalidTypeError,
     MissingFileWarning,
@@ -168,44 +167,25 @@ class ProgrammaticUI:
     Designed for MCP servers and other external callers that need to drive
     the Copier questionnaire step-by-step without terminal I/O.
 
-    When the tree walk (QuestionNode.process) reaches an unanswered question,
-    ask_question() raises QuestionPending carrying the question metadata.
-    The external caller catches it, provides the answer into answers.user,
-    and replays the tree walk. Previously answered questions are skipped
-    automatically.
+    In the unified flow, QuestionNode._ask_question() always raises
+    QuestionPending. The Worker replay loop catches it and calls
+    ui.ask_question(). This implementation re-raises QuestionPending,
+    propagating it to the external caller which provides the answer
+    and triggers the next replay.
 
-    Typical usage::
+    Typical usage via Worker::
 
-        ui = ProgrammaticUI()
-        # ... set up GlobalState with this ui ...
-        while True:
+        with Worker(src_path=src, dst_path=dst, defaults=False) as w:
             try:
-                run_tree_walk(state)
-                break  # all questions answered
+                w.run_copy()  # internally runs the replay loop
             except QuestionPending as qp:
-                answer = get_answer_from_external_source(qp.question_info)
-                state.answers.user[qp.question_info["var_name"]] = answer
+                # MCP server receives the question metadata
+                answer = get_answer_from_ai(qp.question_info)
+                # ... provide answer and re-run ...
     """
 
     def ask_question(self, question: Question, level: int = 0) -> Any:
-        """Raise QuestionPending with question metadata instead of prompting.
-
-        This interrupts the tree walk so the external caller can provide
-        the answer and replay.
-
-        When a question's ``when`` condition is false but it has a default
-        value, the tree walk still reaches ``_ask_question`` (because the
-        interactive UI relies on questionary's ``when`` lambda to silently
-        return the default). We replicate that behaviour here by returning
-        the cast default instead of raising QuestionPending.
-        """
-        # Mirror questionary's when-lambda: skip silently when condition is false
-        if not question.get_when():
-            default = question.get_default()
-            if default is not MISSING:
-                return question.cast_answer(default)
-            return None
-
+        """Re-raise QuestionPending so it propagates to the external caller."""
         question_info: dict[str, Any] = {
             "var_name": question.var_name,
             "type": question.get_type_name(),
@@ -503,6 +483,11 @@ class QuestionNode:
             if question.get_default() is MISSING:
                 return
 
+        # Skip if already processed during a previous replay iteration.
+        # The answer is already parsed and validated in answers.user.
+        if question.var_name in self.state.answers.user:
+            return
+
         if question.var_name in self.state.answers.init:
             # Try to parse and validate (if the question has a validator)
             # the answer value.
@@ -521,21 +506,45 @@ class QuestionNode:
         self._ask_question(question)
 
     def _ask_question(self, question: Question) -> None:
-        """Ask the question to the user and store the answer."""
-        try:
-            if self.state.defaults:
-                new_answer = question.get_default()
-                if new_answer is MISSING:
-                    raise ValueError(f'Question "{question.var_name}" is required')
-            else:
-                new_answer = self.state.ui.ask_question(question, self.level)
+        """Process a question that needs an answer.
 
-        except KeyboardInterrupt as err:
-            raise CopierAnswersInterrupt(
-                self.state.answers, question, self.state.template
-            ) from err
+        In defaults mode, uses the default value directly.
+        When condition is false, stores the cast default silently.
+        Otherwise, raises QuestionPending to interrupt the tree walk
+        so the Worker replay loop can delegate to the active UI.
+        """
+        if self.state.defaults:
+            new_answer = question.get_default()
+            if new_answer is MISSING:
+                raise ValueError(f'Question "{question.var_name}" is required')
+            self.state.answers.user[question.var_name] = new_answer
+            return
 
-        self.state.answers.user[question.var_name] = new_answer
+        # when=False with a default: store silently, no UI interaction needed
+        if not question.get_when():
+            default = question.get_default()
+            if default is not MISSING:
+                self.state.answers.user[question.var_name] = question.cast_answer(
+                    default
+                )
+            return
+
+        question_info: dict[str, Any] = {
+            "var_name": question.var_name,
+            "type": question.get_type_name(),
+            "help": question.get_message(),
+            "default": question.get_default(),
+            "choices": [
+                {"name": c.title, "value": c.value}
+                for c in question._formatted_choices  # noqa: SLF001
+            ]
+            if question.choices
+            else [],
+            "multiselect": question.multiselect,
+            "secret": question.secret,
+            "level": self.level,
+        }
+        raise QuestionPending(question_info, question=question, level=self.level)
 
     def _get_when(self) -> bool:
         if "when" not in self.config:
