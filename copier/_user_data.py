@@ -15,7 +15,7 @@ from functools import cached_property
 from hashlib import sha512
 from os import urandom
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import dpath
 import yaml
@@ -76,6 +76,46 @@ DEFAULT_DATA: AnyByStrDict = {
     "now": _now,
     "make_secret": _make_secret,
 }
+
+
+@runtime_checkable
+class QuestionnaireUI(Protocol):
+    """Abstraction for how questions are presented and answers collected.
+
+    This protocol decouples the questionnaire business logic (hierarchy,
+    conditions, validation) from the I/O mechanism. Implementations include:
+
+    - InteractiveUI: terminal-based prompts via questionary (current behavior)
+    - ProgrammaticUI: no I/O, for use by MCP servers and other programmatic clients
+    """
+
+    def ask_question(self, question: Question, level: int = 0) -> Any:
+        """Present a question and return the answer.
+
+        The implementation is responsible for rendering the question
+        (message, choices, default, type) and collecting a raw answer.
+        Type casting and validation are handled by the caller.
+
+        Args:
+            question: The Question object with all metadata (type, choices,
+                default, help, validator, etc.).
+            level: Nesting depth of the question in the hierarchy (0 = top-level).
+
+        Returns:
+            The raw answer value.
+        """
+        ...
+
+    def show_group_message(self, message: str, level: int = 0) -> None:
+        """Display a group/section header message.
+
+        Called when entering a DICT node to show the group's help text.
+
+        Args:
+            message: The rendered help text for this group.
+            level: Nesting depth of the group in the hierarchy (0 = top-level).
+        """
+        ...
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
