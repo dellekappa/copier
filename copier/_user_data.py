@@ -47,6 +47,7 @@ from .errors import (
     InteractiveSessionError,
     InvalidTypeError,
     MissingFileWarning,
+    QuestionPending,
     UserMessageError,
 )
 
@@ -159,6 +160,58 @@ class InteractiveUI:
             ],
             style="bold",
         )
+
+
+class ProgrammaticUI:
+    """Non-interactive UI for programmatic control of the questionnaire.
+
+    Designed for MCP servers and other external callers that need to drive
+    the Copier questionnaire step-by-step without terminal I/O.
+
+    When the tree walk (QuestionNode.process) reaches an unanswered question,
+    ask_question() raises QuestionPending carrying the question metadata.
+    The external caller catches it, provides the answer into answers.user,
+    and replays the tree walk. Previously answered questions are skipped
+    automatically.
+
+    Typical usage::
+
+        ui = ProgrammaticUI()
+        # ... set up GlobalState with this ui ...
+        while True:
+            try:
+                run_tree_walk(state)
+                break  # all questions answered
+            except QuestionPending as qp:
+                answer = get_answer_from_external_source(qp.question_info)
+                state.answers.user[qp.question_info["var_name"]] = answer
+    """
+
+    def ask_question(self, question: Question, level: int = 0) -> Any:
+        """Raise QuestionPending with question metadata instead of prompting.
+
+        This interrupts the tree walk so the external caller can provide
+        the answer and replay.
+        """
+        question_info: dict[str, Any] = {
+            "var_name": question.var_name,
+            "type": question.get_type_name(),
+            "help": question.get_message(),
+            "default": question.get_default(),
+            "choices": [
+                {"name": c.title, "value": c.value}
+                for c in question._formatted_choices  # noqa: SLF001
+            ]
+            if question.choices
+            else [],
+            "multiselect": question.multiselect,
+            "secret": question.secret,
+            "level": level,
+        }
+        raise QuestionPending(question_info)
+
+    def show_group_message(self, message: str, level: int = 0) -> None:
+        """No-op: group messages are included in the next QuestionPending."""
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))

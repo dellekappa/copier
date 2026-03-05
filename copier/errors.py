@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._tools import printf_exception
 from ._types import PathSeq
@@ -48,6 +48,7 @@ __all__ = [
     "MissingSettingsWarning",
     "MissingFileWarning",
     "InteractiveSessionError",
+    "QuestionPending",
 ]
 
 
@@ -240,3 +241,21 @@ class InteractiveSessionError(UserMessageError):
 
 class SettingsError(CopierError):
     """Exception raised when the settings are invalid."""
+
+
+class QuestionPending(CopierError):
+    """Raised by ProgrammaticUI to interrupt the tree walk at an unanswered question.
+
+    This is a control flow mechanism, not an error. When QuestionNode.process()
+    reaches the first question that needs an external answer, ProgrammaticUI's
+    ask_question() raises this exception carrying the question metadata.
+    The caller catches it, provides the answer into the answers map, and
+    replays the tree walk — previously answered questions are skipped.
+
+    Attributes:
+        question_info: Dict with question metadata (var_name, type, choices, etc.)
+    """
+
+    def __init__(self, question_info: dict[str, Any]) -> None:
+        self.question_info = question_info
+        super().__init__(f"Question pending: {question_info.get('var_name', '?')}")
