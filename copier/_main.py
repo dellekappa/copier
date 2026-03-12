@@ -64,23 +64,23 @@ from ._types import (
     RelativePath,
     VcsRef,
 )
+from ._ui import (
+    InteractiveUI,
+    QuestionnaireUI,
+)
 from ._user_data import (
     AnswersMap,
     GlobalState,
-    InteractiveUI,
-    ProgrammaticUI,
-    QuestionnaireUI,
     QuestionNode,
     load_answersfile_data,
     write_answers_to_dict,
 )
 from ._vcs import get_git
 from .errors import (
-    CopierAnswersInterrupt,
     ExtensionNotFoundError,
     ForbiddenPathError,
     InteractiveSessionError,
-    QuestionPending,
+    NoMoreQuestionsError,
     TaskError,
     UnsafeTemplateError,
     UserMessageError,
@@ -257,17 +257,9 @@ class Worker:
     unsafe: bool = False
     skip_answered: bool = False
     skip_tasks: bool = False
-    mode: Literal["interactive", "programmatic"] = "interactive"
 
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
-
-    @property
-    def _ui(self) -> QuestionnaireUI:
-        """Resolve the questionnaire UI strategy from the mode."""
-        if self.mode == "programmatic":
-            return ProgrammaticUI()
-        return InteractiveUI()
 
     def __enter__(self) -> Worker:
         """Allow using worker as a context manager."""
@@ -565,7 +557,7 @@ class Worker:
             return is_dir
         return self._solve_render_conflict(dst_relpath)
 
-    def _ask(self) -> None:  # noqa: C901
+    def _ask_all(self) -> None:  # noqa: C901
         """Ask the questions of the questionnaire and record their answers.
 
         Uses a replay loop: the tree walk raises QuestionPending when it
@@ -573,6 +565,34 @@ class Worker:
         active UI (interactive or programmatic) and replays from the start.
         Previously answered questions are skipped via answers.user.
         """
+        state = None
+
+        while True:
+            try:
+                state = self._ask_next(ui=InteractiveUI(), state=state)
+            except NoMoreQuestionsError:  # noqa: PERF203
+                break
+
+    def _ask_next(
+        self, ui: QuestionnaireUI, state: GlobalState | None = None
+    ) -> GlobalState:
+        """Single pass through the question tree.
+
+        Returns the first QuestionPending encountered, or None if all
+        questions have been answered.
+        """
+        if state is None:
+            state = self._init_questionnaire()
+
+        for question_name, details in self.template.questions_data.items():
+            node = QuestionNode(question_name, details, state)
+            node.process(ui)
+
+        self.answers.external = self._external_data()
+        raise NoMoreQuestionsError
+
+    def _init_questionnaire(self) -> GlobalState:
+        """Initialize answers and global state for the questionnaire phase."""
         self.answers = AnswersMap(
             user_defaults=self.user_defaults,
             init=self.data,
@@ -581,7 +601,7 @@ class Worker:
             external=self._external_data(),
         )
 
-        state = GlobalState(
+        return GlobalState(
             _context_renderer=self._render_context,
             template=self.template,
             answers=self.answers,
@@ -589,26 +609,7 @@ class Worker:
             settings=self.settings,
             defaults=self.defaults,
             skip_answered=self.skip_answered,
-            ui=self._ui,
         )
-
-        while True:
-            try:
-                for question_name, details in self.template.questions_data.items():
-                    node = QuestionNode(question_name, details, state)
-                    node.process()
-                break  # All questions answered
-            except QuestionPending as qp:
-                try:
-                    answer = state.ui.ask_question(qp.question, qp.level)
-                except KeyboardInterrupt as err:
-                    raise CopierAnswersInterrupt(
-                        state.answers, qp.question, state.template
-                    ) from err
-                state.answers.user[qp.question_info["var_name"]] = answer
-
-        # Reload external data, which may depend on answers
-        self.answers.external = self._external_data()
 
     @property
     def answers_relpath(self) -> Path:
@@ -1076,7 +1077,7 @@ class Worker:
         self._check_unsafe("copy")
         self._print_message(self.template.message_before_copy)
         with Phase.use(Phase.PROMPT):
-            self._ask()
+            self._ask_all()
         was_existing = self.subproject.local_abspath.exists()
         try:
             if not self.quiet:
@@ -1519,7 +1520,6 @@ def run_copy(
     quiet: bool = False,
     unsafe: bool = False,
     skip_tasks: bool = False,
-    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Copy a template to a destination, from zero."""
     with Worker(
@@ -1548,7 +1548,6 @@ def run_copy(
         quiet=quiet,
         unsafe=unsafe,
         skip_tasks=skip_tasks,
-        mode=mode,
     ) as worker:
         worker.run_copy()
     return worker
@@ -1573,7 +1572,6 @@ def run_recopy(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
-    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Update a subproject from its template, discarding subproject evolution."""
     with Worker(
@@ -1602,7 +1600,6 @@ def run_recopy(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
-        mode=mode,
     ) as worker:
         worker.run_recopy()
     return worker
@@ -1629,7 +1626,6 @@ def run_update(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
-    mode: Literal["interactive", "programmatic"] = "interactive",
 ) -> Worker:
     """Update a subproject, from its template."""
     with Worker(
@@ -1660,7 +1656,6 @@ def run_update(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
-        mode=mode,
     ) as worker:
         worker.run_update()
     return worker

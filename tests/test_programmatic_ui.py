@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any
 
 import pytest
 from plumbum import local
 
 from copier._main import Worker
+from copier._ui import QuestionnaireUI
 from copier._user_data import (
     GlobalState,
-    ProgrammaticUI,
-    QuestionnaireUI,
     QuestionNode,
 )
 from copier.errors import QuestionPending
 
-from .helpers import build_file_tree, git_save
+from .helpers import ProgrammaticUI, build_file_tree, git_save
 
 
 @pytest.fixture()
@@ -111,8 +110,8 @@ def dict_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return src
 
 
-def _make_state(worker: Worker, ui: ProgrammaticUI | None = None) -> GlobalState:
-    """Create a GlobalState from a Worker, mimicking Worker._ask() setup."""
+def _make_state(worker: Worker) -> GlobalState:
+    """Create a GlobalState from a Worker, mimicking Worker._ask_all() setup."""
     from copier._user_data import AnswersMap
 
     worker.answers = AnswersMap(
@@ -126,7 +125,6 @@ def _make_state(worker: Worker, ui: ProgrammaticUI | None = None) -> GlobalState
         template=worker.template,
         answers=worker.answers,
         jinja_env=worker.jinja_env,
-        ui=ui or ProgrammaticUI(),
         settings=worker.settings,
         defaults=worker.defaults,
         skip_answered=worker.skip_answered,
@@ -136,7 +134,7 @@ def _make_state(worker: Worker, ui: ProgrammaticUI | None = None) -> GlobalState
 def _collect_questions_via_replay(
     state: GlobalState,
     answers: dict[str, object] | None = None,
-) -> list[dict[str, object]]:
+) -> list[tuple[Any, int]]:
     """Drive the tree walk via QuestionPending replay, returning all questions asked.
 
     For each QuestionPending, uses the provided answers dict or falls back
@@ -145,22 +143,22 @@ def _collect_questions_via_replay(
     if answers is None:
         answers = {}
 
-    questions_asked: list[dict[str, object]] = []
+    questions_asked: list[tuple[Any, int]] = []
 
     while True:
         try:
             for qname, details in state.template.questions_data.items():
                 node = QuestionNode(qname, details, state)
-                node.process()
+                node.process(ProgrammaticUI())
             break  # All questions answered
         except QuestionPending as qp:
-            questions_asked.append(qp.question_info)
-            var_name = qp.question_info["var_name"]
+            questions_asked.append((qp.question, qp.level))
+            var_name = qp.question.name
             if var_name in answers:
                 state.answers.user[var_name] = answers[var_name]
             else:
                 # Use default
-                state.answers.user[var_name] = qp.question_info["default"]
+                state.answers.user[var_name] = qp.question.default
 
     return questions_asked
 
@@ -188,13 +186,13 @@ def test_question_pending_raised_on_first_unanswered(
         with pytest.raises(QuestionPending) as exc_info:
             for qname, details in state.template.questions_data.items():
                 node = QuestionNode(qname, details, state)
-                node.process()
+                node.process(ui=ProgrammaticUI())
 
-        qp = exc_info.value.question_info
-        assert qp["var_name"] == "project_name"
-        assert qp["type"] == "str"
-        assert qp["default"] == "my-project"
-        assert qp["help"] == "What is your project name?"
+        qp = exc_info.value.question
+        assert qp.name == "project_name"
+        assert qp.type == "str"
+        assert qp.default == "my-project"
+        assert qp.message == "What is your project name?"
 
 
 def test_replay_collects_all_questions(
@@ -207,7 +205,7 @@ def test_replay_collects_all_questions(
         questions = _collect_questions_via_replay(state)
 
         assert len(questions) == 3
-        assert [q["var_name"] for q in questions] == [
+        assert [q[0].name for q in questions] == [
             "project_name",
             "version",
             "description",
@@ -244,7 +242,7 @@ def test_conditional_skipped_when_false(
         # use_database = false → db_host and db_port should be skipped
         questions = _collect_questions_via_replay(state, {"use_database": False})
 
-        asked_names = [q["var_name"] for q in questions]
+        asked_names = [q[0].name for q in questions]
         assert "use_database" in asked_names
         assert "db_host" not in asked_names
         assert "db_port" not in asked_names
@@ -262,7 +260,7 @@ def test_conditional_asked_when_true(
         # use_database = true → db_host and db_port should be asked
         questions = _collect_questions_via_replay(state, {"use_database": True})
 
-        asked_names = [q["var_name"] for q in questions]
+        asked_names = [q[0].name for q in questions]
         assert asked_names == ["use_database", "db_host", "db_port"]
 
 
@@ -279,42 +277,12 @@ def test_dict_questions_have_level(
         questions = _collect_questions_via_replay(state)
 
         # project_name is top-level
-        assert questions[0]["var_name"] == "project_name"
-        assert questions[0]["level"] == 0
+        assert questions[0][0].name == "project_name"
+        assert questions[0][1] == 0
 
         # host and port are inside "database" dict → level 1
-        nested = [q for q in questions if cast(int, q["level"]) > 0]
+        nested = [q for q in questions if q[1] > 0]
         assert len(nested) == 2
-        nested_names = [q["var_name"] for q in nested]
+        nested_names = [q[0].name for q in nested]
         assert "database.host" in nested_names
         assert "database.port" in nested_names
-
-
-# -- QuestionPending metadata --
-
-
-def test_question_pending_metadata_complete(
-    basic_template: Path, tmp_path_factory: pytest.TempPathFactory
-) -> None:
-    """QuestionPending should carry all required metadata fields."""
-    dst = tmp_path_factory.mktemp("dst")
-    with Worker(src_path=str(basic_template), dst_path=dst, defaults=False) as worker:
-        state = _make_state(worker)
-
-        with pytest.raises(QuestionPending) as exc_info:
-            for qname, details in state.template.questions_data.items():
-                node = QuestionNode(qname, details, state)
-                node.process()
-
-        info = exc_info.value.question_info
-        expected_keys = {
-            "var_name",
-            "type",
-            "help",
-            "default",
-            "choices",
-            "multiselect",
-            "secret",
-            "level",
-        }
-        assert set(info.keys()) == expected_keys

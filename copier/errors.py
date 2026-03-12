@@ -49,6 +49,7 @@ __all__ = [
     "MissingFileWarning",
     "InteractiveSessionError",
     "QuestionPending",
+    "NoMoreQuestionsError",
 ]
 
 
@@ -243,6 +244,10 @@ class SettingsError(CopierError):
     """Exception raised when the settings are invalid."""
 
 
+class NoMoreQuestionsError(CopierError):
+    """Raised when there are no more questions to ask."""
+
+
 class QuestionPending(CopierError):
     """Raised to interrupt the tree walk at an unanswered question.
 
@@ -255,19 +260,15 @@ class QuestionPending(CopierError):
     - ProgrammaticUI re-raises it to the external caller (MCP server).
 
     Attributes:
-        question_info: Dict with question metadata (var_name, type, choices, etc.)
         question: The internal Question object (for the UI to use).
         level: The nesting depth of the question in the tree.
     """
 
     def __init__(
         self,
-        question_info: dict[str, Any],
-        *,
-        question: Any = None,
+        question: Any,
         level: int = 0,
     ) -> None:
-        self.question_info = question_info
         self.question = question
         self.level = level
-        super().__init__(f"Question pending: {question_info.get('var_name', '?')}")
+        super().__init__(f"Question pending: {question.name}")

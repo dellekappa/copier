@@ -770,7 +770,8 @@ def test_update_choice(
     assert answers["pick_one"] == 3.0
 
 
-@pytest.mark.skip("TODO: fix this")
+# @pytest.mark.skip("TODO: fix this")
+# prettier-ignore
 def test_multiline_defaults(
     tmp_path_factory: pytest.TempPathFactory, spawn: Spawn
 ) -> None:
@@ -814,14 +815,19 @@ def test_multiline_defaults(
     tui.expect_exact("[one, two, {three: [four]}]")
     tui.send(Keyboard.Enter)
     expect_prompt(tui, "yaml_multi", "yaml")
-    tui.expect_exact("> - one\n  - two\n  - three:\n    - four")
+    # tui.expect_exact("> - one\n  - two\n  - three:\n    - four")
+    tui.expect_exact("> - one\r\n  - two\r\n  - three:\r\n    - four")
+    tui.send(Keyboard.Enter)
     tui.send(Keyboard.Alt + Keyboard.Enter)
     expect_prompt(tui, "json_single", "json")
     tui.expect_exact('["one", "two", {"three": ["four"]}]')
     tui.send(Keyboard.Enter)
     expect_prompt(tui, "json_multi", "json")
+    # tui.expect_exact(
+    #     '> [\n    "one",\n    "two",\n    {\n      "three": [\n        "four"\n      ]\n    }\n  ]' # noqa: W505
+    # )
     tui.expect_exact(
-        '> [\n    "one",\n    "two",\n    {\n      "three": [\n        "four"\n      ]\n    }\n  ]'
+        '> [\r\n    "one",\r\n    "two",\r\n    {\r\n      "three": [\r\n        "four"\r\n      ]\r\n    }\r\n  ]'
     )
     tui.send(Keyboard.Alt + Keyboard.Enter)
     tui.expect_exact(pexpect.EOF)

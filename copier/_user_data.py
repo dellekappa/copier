@@ -7,7 +7,6 @@ import re
 import warnings
 from collections import ChainMap
 from collections.abc import Callable, Mapping, Sequence
-from copy import deepcopy
 from dataclasses import field
 from datetime import datetime
 from enum import Enum
@@ -15,38 +14,33 @@ from functools import cached_property
 from hashlib import sha512
 from os import urandom
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 import dpath
 import yaml
 from jinja2 import StrictUndefined, UndefinedError
 from jinja2.sandbox import SandboxedEnvironment
-from prompt_toolkit.lexers import PygmentsLexer
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.dataclasses import dataclass
 from pydantic_core.core_schema import ValidationInfo
-from pygments.lexers.data import JsonLexer, YamlLexer
-from questionary import unsafe_prompt
-from questionary.prompts.common import Choice
 
 from copier._jinja_ext import UnsetError
 from copier._settings import SettingsModel
 
 from ._template import Template
-from ._tools import cast_to_bool, cast_to_str, force_str_end, parse_dpath_path
+from ._tools import cast_to_bool, cast_to_str, parse_dpath_path
 from ._types import (
     MISSING,
     AnyByStrDict,
     AnyByStrMutableMapping,
     LazyDict,
-    MissingType,
     StrOrPath,
 )
+from ._ui import Choice as UIChoice, Question as UIQuestion, QuestionnaireUI
 from .errors import (
-    InteractiveSessionError,
+    CopierAnswersInterrupt,
     InvalidTypeError,
     MissingFileWarning,
-    QuestionPending,
     UserMessageError,
 )
 
@@ -78,135 +72,6 @@ DEFAULT_DATA: AnyByStrDict = {
 }
 
 
-@runtime_checkable
-class QuestionnaireUI(Protocol):
-    """Abstraction for how questions are presented and answers collected.
-
-    This protocol decouples the questionnaire business logic (hierarchy,
-    conditions, validation) from the I/O mechanism. Implementations include:
-
-    - InteractiveUI: terminal-based prompts via questionary (current behavior)
-    - ProgrammaticUI: no I/O, for use by MCP servers and other programmatic clients
-    """
-
-    def ask_question(self, question: Question, level: int = 0) -> Any:
-        """Present a question and return the answer.
-
-        The implementation is responsible for rendering the question
-        (message, choices, default, type) and collecting a raw answer.
-        Type casting and validation are handled by the caller.
-
-        Args:
-            question: The Question object with all metadata (type, choices,
-                default, help, validator, etc.).
-            level: Nesting depth of the question in the hierarchy (0 = top-level).
-
-        Returns:
-            The raw answer value.
-        """
-        ...
-
-    def show_group_message(self, message: str, level: int = 0) -> None:
-        """Display a group/section header message.
-
-        Called when entering a DICT node to show the group's help text.
-
-        Args:
-            message: The rendered help text for this group.
-            level: Nesting depth of the group in the hierarchy (0 = top-level).
-        """
-        ...
-
-
-class InteractiveUI:
-    """Terminal-based questionnaire UI using questionary.
-
-    This is the default implementation of QuestionnaireUI, preserving
-    the existing interactive behavior of Copier.
-    """
-
-    @staticmethod
-    def _level_to_padding(level: int) -> str:
-        return " " * (level * 2) + " " if level else ""
-
-    def ask_question(self, question: Question, level: int = 0) -> Any:
-        """Prompt the user interactively via questionary and return the answer."""
-        padding = self._level_to_padding(level)
-        def_value = question.get_default()
-        try:
-            new_answer = unsafe_prompt(
-                [question.get_questionary_structure(padding)],
-                answers={
-                    question.var_name: def_value if def_value is not MISSING else None
-                },
-            )[question.var_name]
-        except EOFError as err:
-            raise InteractiveSessionError(
-                "Use `--defaults` and/or `--data`/`--data-file`"
-            ) from err
-        return new_answer
-
-    def show_group_message(self, message: str, level: int = 0) -> None:
-        """Print a group header message to the terminal."""
-        padding = self._level_to_padding(level)
-        unsafe_prompt(
-            [
-                {
-                    "type": "print",
-                    "message": f"{padding} ▷ {message}",
-                    "when": lambda _: True,
-                }
-            ],
-            style="bold",
-        )
-
-
-class ProgrammaticUI:
-    """Non-interactive UI for programmatic control of the questionnaire.
-
-    Designed for MCP servers and other external callers that need to drive
-    the Copier questionnaire step-by-step without terminal I/O.
-
-    In the unified flow, QuestionNode._ask_question() always raises
-    QuestionPending. The Worker replay loop catches it and calls
-    ui.ask_question(). This implementation re-raises QuestionPending,
-    propagating it to the external caller which provides the answer
-    and triggers the next replay.
-
-    Typical usage via Worker::
-
-        with Worker(src_path=src, dst_path=dst, defaults=False) as w:
-            try:
-                w.run_copy()  # internally runs the replay loop
-            except QuestionPending as qp:
-                # MCP server receives the question metadata
-                answer = get_answer_from_ai(qp.question_info)
-                # ... provide answer and re-run ...
-    """
-
-    def ask_question(self, question: Question, level: int = 0) -> Any:
-        """Re-raise QuestionPending so it propagates to the external caller."""
-        question_info: dict[str, Any] = {
-            "var_name": question.var_name,
-            "type": question.get_type_name(),
-            "help": question.get_message(),
-            "default": question.get_default(),
-            "choices": [
-                {"name": c.title, "value": c.value}
-                for c in question._formatted_choices  # noqa: SLF001
-            ]
-            if question.choices
-            else [],
-            "multiselect": question.multiselect,
-            "secret": question.secret,
-            "level": level,
-        }
-        raise QuestionPending(question_info)
-
-    def show_group_message(self, message: str, level: int = 0) -> None:
-        """No-op: group messages are included in the next QuestionPending."""
-
-
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class AnswersMap:
     """Object that gathers answers from different sources.
@@ -234,7 +99,7 @@ class AnswersMap:
         user_defaults:
             Default data from the user e.g. previously completed and restored data.
 
-        system:
+        external:
             Automatic context generated by the worker.
     """
 
@@ -280,7 +145,6 @@ class GlobalState:
     template: Template
     answers: AnswersMap
     jinja_env: SandboxedEnvironment
-    ui: QuestionnaireUI = field(default_factory=InteractiveUI)
     settings: SettingsModel = field(default_factory=SettingsModel)
     defaults: bool = False
     skip_answered: bool = False
@@ -375,15 +239,15 @@ class QuestionNode:
                 name = self.name.replace(".", "\\.")
                 self._path = f"{self.parent._path}.{name}"
 
-    def process(self, silent: bool = False) -> None:
+    def process(self, ui: QuestionnaireUI, silent: bool = False) -> None:
         if self._type == QuestionNodeType.LIST:
-            self._process_as_list(silent)
+            self._process_as_list(ui, silent)
         elif self._type == QuestionNodeType.DICT:
-            self._process_as_dict(silent)
+            self._process_as_dict(ui, silent)
         else:
-            self._process_as_leaf(silent)
+            self._process_as_leaf(ui, silent)
 
-    def _process_as_list(self, silent: bool) -> None:
+    def _process_as_list(self, ui: QuestionnaireUI, silent: bool) -> None:
         for i in range(self._size):
             node = QuestionNode(
                 name=self.name,
@@ -393,7 +257,7 @@ class QuestionNode:
                 index=i,
                 extra_context={**self.extra_context},
             )
-            node.process(silent)
+            node.process(ui, silent)
 
         # Remove answers from the last answers dict that exceed the expected size.
         for k in list(self.state.answers.last.keys()):
@@ -405,7 +269,7 @@ class QuestionNode:
                 continue
             del self.state.answers.last[k]
 
-    def _process_as_dict(self, silent: bool) -> None:
+    def _process_as_dict(self, ui: QuestionnaireUI, silent: bool) -> None:
         _silent = silent
         # Skip a question when the skip condition is met.
         if not self._get_when():
@@ -436,7 +300,7 @@ class QuestionNode:
                 message = self._render_value(self.config["help"])
 
             if self._get_when():
-                self.state.ui.show_group_message(message, self.level)
+                ui.show_group_message(message, self.level)
 
         for name, config in self.config["items"].items():
             node = QuestionNode(
@@ -447,9 +311,9 @@ class QuestionNode:
                 level=self.level + 1,
                 extra_context={**self.extra_context},
             )
-            node.process(_silent)
+            node.process(ui, _silent)
 
-    def _process_as_leaf(self, silent: bool) -> None:
+    def _process_as_leaf(self, ui: QuestionnaireUI, silent: bool) -> None:
         question = Question(
             var_name=self._path,
             state=self.state,
@@ -503,48 +367,60 @@ class QuestionNode:
         if self.state.skip_answered and question.var_name in self.state.answers.last:
             return
 
-        self._ask_question(question)
+        self._ask_question(question, ui)
 
-    def _ask_question(self, question: Question) -> None:
-        """Process a question that needs an answer.
+    def _ask_question(self, question: Question, ui: QuestionnaireUI) -> None:
+        """Ask the question to the user and store the answer."""
+        try:
+            # Handle getting an answer
+            if self.state.defaults:
+                new_answer = question.get_default()
+                if new_answer is MISSING:
+                    raise ValueError(f'Question "{question.var_name}" is required')
+                self.state.answers.user[question.var_name] = new_answer
+                return
 
-        In defaults mode, uses the default value directly.
-        When condition is false, stores the cast default silently.
-        Otherwise, raises QuestionPending to interrupt the tree walk
-        so the Worker replay loop can delegate to the active UI.
-        """
-        if self.state.defaults:
-            new_answer = question.get_default()
-            if new_answer is MISSING:
-                raise ValueError(f'Question "{question.var_name}" is required')
+            type_name = question.get_type_name()
+            multiline = (
+                type_name != "bool"
+                and not question.choices
+                and question.get_multiline()
+            )
+
+            def _validate(answer: str) -> str | Literal[True]:
+                try:
+                    ans = question.parse_answer(answer)
+                except Exception:
+                    return "Invalid input"
+                try:
+                    question.validate_answer(ans)
+                except Exception as exc:
+                    return str(exc)
+                return True
+
+            # Convert to UI question and ask it to the user
+            ui_question = UIQuestion(
+                name=question.var_name,
+                message=question.get_message(),
+                qmark=question.qmark,
+                secret=question.secret,
+                default=question.get_default(),
+                type=type_name,
+                choices=question._formatted_choices,
+                multiselect=question.multiselect,
+                multiline=multiline,
+                placeholder=question.get_placeholder(),
+                silent=not question.get_when(),
+                transform_answer=question.cast_answer,
+                validate_answer=_validate,
+            )
+
+            new_answer = ui.ask_question(question=ui_question, level=self.level)
             self.state.answers.user[question.var_name] = new_answer
-            return
-
-        # when=False with a default: store silently, no UI interaction needed
-        if not question.get_when():
-            default = question.get_default()
-            if default is not MISSING:
-                self.state.answers.user[question.var_name] = question.cast_answer(
-                    default
-                )
-            return
-
-        question_info: dict[str, Any] = {
-            "var_name": question.var_name,
-            "type": question.get_type_name(),
-            "help": question.get_message(),
-            "default": question.get_default(),
-            "choices": [
-                {"name": c.title, "value": c.value}
-                for c in question._formatted_choices  # noqa: SLF001
-            ]
-            if question.choices
-            else [],
-            "multiselect": question.multiselect,
-            "secret": question.secret,
-            "level": self.level,
-        }
-        raise QuestionPending(question_info, question=question, level=self.level)
+        except KeyboardInterrupt as err:
+            raise CopierAnswersInterrupt(
+                self.state.answers, question, self.state.template
+            ) from err
 
     def _get_when(self) -> bool:
         if "when" not in self.config:
@@ -716,44 +592,8 @@ class Question:
             self.validate_answer(result)
         return result
 
-    def get_default_rendered(self) -> bool | str | Choice | None | MissingType:
-        """Get default answer rendered for the questionary lib.
-
-        The questionary lib expects some specific data types, and returns
-        it when the user answers. Sometimes you need to compare the response
-        to the rendered one, or vice-versa.
-
-        This helper allows such usages.
-        """
-        default = self.get_default()
-        if default is MISSING:
-            return MISSING
-        # If there are choices, return the one that matches the expressed default
-        if self.choices:
-            # questionary checkbox use Choice.checked for multiple default
-            if not self.multiselect:
-                for choice in self._formatted_choices:
-                    if choice.value == default:
-                        return choice
-            return None
-        # Yes/No questions expect and return bools
-        if isinstance(default, bool) and self.get_type_name() == "bool":
-            return default
-        # Emptiness is expressed as an empty str
-        if default is None:
-            return ""
-        # JSON and YAML dumped depending on multiline setting
-        if self.get_type_name() == "json":
-            return json.dumps(default, indent=2 if self.get_multiline() else None)
-        if self.get_type_name() == "yaml":
-            return yaml.safe_dump(
-                default, default_flow_style=not self.get_multiline(), width=2147483647
-            ).strip()
-        # All other data has to be str
-        return str(default)
-
     @cached_property
-    def _formatted_choices(self) -> Sequence[Choice]:
+    def _formatted_choices(self) -> Sequence[UIChoice]:
         """Obtain choices rendered and properly formatted."""
         result = []
         choices = self.choices
@@ -761,6 +601,7 @@ class Question:
             choices = parse_yaml_string(self.render_value(self.choices))
         if isinstance(choices, dict):
             choices = list(choices.items())
+
         for choice in choices:
             # If a choice is a value pair
             if isinstance(choice, (tuple, list)):
@@ -781,10 +622,19 @@ class Question:
 
                 disabled = self.render_value(value.get("validator", ""))
                 value = value["value"]
-            c = Choice(name, self.render_value(value), disabled=disabled)
+
+            rendered_value = self.render_value(value)
+            choice_value = rendered_value if rendered_value is not None else name
             # Try to cast the value according to the question's type to raise
             # an error in case the value is incompatible.
-            self.cast_answer(c.value)
+            self.cast_answer(choice_value)
+
+            c = UIChoice(
+                name=name,
+                value=choice_value,
+                disabled=disabled,
+            )
+
             result.append(c)
         return result
 
@@ -801,70 +651,6 @@ class Question:
     def get_placeholder(self) -> str:
         """Render and obtain the placeholder."""
         return self.render_value(self.placeholder)
-
-    def get_questionary_structure(self, padding: str = "") -> AnyByStrDict:  # noqa: C901
-        """Get the question in a format that the questionary lib understands."""
-
-        def _validate(answer: str) -> str | Literal[True]:
-            try:
-                ans = self.parse_answer(answer)
-            except Exception:
-                return "Invalid input"
-            try:
-                self.validate_answer(ans)
-            except Exception as exc:
-                return str(exc)
-            return True
-
-        msg = f"{force_str_end(self.get_message())}  {padding}"
-        lexer = None
-        qmark = self.qmark or ("🕵️" if self.secret else "🎤")
-        result: AnyByStrDict = {
-            "filter": self.cast_answer,
-            "message": msg,
-            "mouse_support": True,
-            "name": self.var_name,
-            "qmark": f"{padding}{qmark}",
-            "when": lambda _: self.get_when(),
-        }
-        default = self.get_default_rendered()
-        if default is not MISSING:
-            result["default"] = default
-        questionary_type = "input"
-        type_name = self.get_type_name()
-        if type_name == "bool":
-            questionary_type = "confirm"
-            # For backwards compatibility
-            if default is MISSING:
-                result["default"] = False
-        if self.choices:
-            questionary_type = "checkbox" if self.multiselect else "select"
-            choices = self._formatted_choices
-            # Select default choices for a multiselect question.
-            if self.multiselect and isinstance(
-                default_choices := self.get_default(), list
-            ):
-                for choice in (choices := deepcopy(choices)):
-                    choice.checked = self.cast_answer(choice.value) in default_choices
-            result["choices"] = choices
-        if questionary_type == "input":
-            if self.secret:
-                questionary_type = "password"
-            elif type_name == "yaml":
-                lexer = PygmentsLexer(YamlLexer)
-            elif type_name == "json":
-                lexer = PygmentsLexer(JsonLexer)
-            if lexer:
-                result["lexer"] = lexer
-            result["multiline"] = self.get_multiline()
-            if placeholder := self.get_placeholder():
-                result["placeholder"] = placeholder
-        if type_name == "path":
-            questionary_type = "path"
-        if questionary_type in {"input", "checkbox", "password", "path"}:
-            result["validate"] = _validate
-        result.update({"type": questionary_type})
-        return result
 
     def get_type_name(self) -> str:
         """Render the type name and return it."""
