@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import warnings
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from contextvars import ContextVar
@@ -29,6 +30,11 @@ from typing import (
     overload,
 )
 from unicodedata import normalize
+
+if sys.version_info < (3, 11):
+    from typing_extensions import Self
+else:
+    from typing import Self
 
 from jinja2.loaders import FileSystemLoader
 from packaging.version import Version
@@ -66,6 +72,8 @@ from ._types import (
 )
 from ._ui import (
     InteractiveUI,
+    ProgrammaticUI,
+    Question,
     QuestionnaireUI,
 )
 from ._user_data import (
@@ -80,7 +88,7 @@ from .errors import (
     ExtensionNotFoundError,
     ForbiddenPathError,
     InteractiveSessionError,
-    NoMoreQuestionsError,
+    QuestionPendingError,
     TaskError,
     UnsafeTemplateError,
     UserMessageError,
@@ -117,13 +125,14 @@ def as_operation(value: Operation) -> Callable[[Callable[_P, _T]], Callable[_P, 
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class Worker:
+class Worker(ABC):
     """Copier process state manager.
 
     This class represents the state of a copier work, and contains methods to
     actually produce the desired work.
 
-    To use it properly, use it as a context manager and fill all dataclass fields.
+    To use it properly, instantiate a concrete subclass (SyncWorker or
+    AsyncWorker), use it as a context manager and fill all dataclass fields.
 
     Then, execute one of its main methods, which are prefixed with `run_`:
 
@@ -133,8 +142,9 @@ class Worker:
 
     Example:
         ```python
-        with Worker(
-            src_path="https://github.com/copier-org/autopretty.git", "output"
+        with SyncWorker(
+            src_path="https://github.com/copier-org/autopretty.git",
+            dst_path="output",
         ) as worker:
             worker.run_copy()
         ```
@@ -261,7 +271,7 @@ class Worker:
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
 
-    def __enter__(self) -> Worker:
+    def __enter__(self) -> Self:
         """Allow using worker as a context manager."""
         return self
 
@@ -557,39 +567,9 @@ class Worker:
             return is_dir
         return self._solve_render_conflict(dst_relpath)
 
+    @abstractmethod
     def _ask_all(self) -> None:  # noqa: C901
-        """Ask the questions of the questionnaire and record their answers.
-
-        Uses a replay loop: the tree walk raises QuestionPending when it
-        reaches a question that needs an answer. The loop delegates to the
-        active UI (interactive or programmatic) and replays from the start.
-        Previously answered questions are skipped via answers.user.
-        """
-        state = None
-
-        while True:
-            try:
-                state = self._ask_next(ui=InteractiveUI(), state=state)
-            except NoMoreQuestionsError:  # noqa: PERF203
-                break
-
-    def _ask_next(
-        self, ui: QuestionnaireUI, state: GlobalState | None = None
-    ) -> GlobalState:
-        """Single pass through the question tree.
-
-        Returns the first QuestionPending encountered, or None if all
-        questions have been answered.
-        """
-        if state is None:
-            state = self._init_questionnaire()
-
-        for question_name, details in self.template.questions_data.items():
-            node = QuestionNode(question_name, details, state)
-            node.process(ui)
-
-        self.answers.external = self._external_data()
-        raise NoMoreQuestionsError
+        pass
 
     def _init_questionnaire(self) -> GlobalState:
         """Initialize answers and global state for the questionnaire phase."""
@@ -1057,27 +1037,19 @@ class Worker:
         subdir = self._render_string(self.template.subdirectory) or ""
         return self.template.local_abspath / subdir
 
-    # Main operations
-    @as_operation("copy")
-    def run_copy(self) -> None:
-        """Generate a subproject from zero, ignoring what was in the folder.
+    # Main operations — phase decomposition
 
-        If `dst_path` was missing, it will be
-        created. Otherwise, `src_path` be rendered
-        directly into it, without worrying about evolving what was there
-        already.
-
-        See [generating a project][generating-a-project].
-        """
+    def _pre_copy(self) -> None:
+        """Validation and setup before the copy questionnaire."""
         with suppress(AttributeError):
             # We might have switched operation context, ensure the cached property
             # is regenerated to re-render templates.
             del self.match_exclude
-
         self._check_unsafe("copy")
         self._print_message(self.template.message_before_copy)
-        with Phase.use(Phase.PROMPT):
-            self._ask_all()
+
+    def _finalize_copy(self) -> None:
+        """Render template, execute tasks, and print messages after copy."""
         was_existing = self.subproject.local_abspath.exists()
         try:
             if not self.quiet:
@@ -1103,34 +1075,17 @@ class Worker:
             # TODO Unify printing tools
             print("")  # padding space
 
-    @as_operation("copy")
-    def run_recopy(self) -> None:
-        """Update a subproject, keeping answers but discarding evolution."""
+    def _pre_recopy(self) -> None:
+        """Resolve src_path for recopy."""
         if self.subproject.template is None:
             raise UserMessageError(
                 "Cannot recopy because cannot obtain old template references "
                 f"from `{self.subproject.answers_relpath}`."
             )
-        with replace(self, src_path=self.subproject.template.url) as new_worker:
-            new_worker.run_copy()
 
-    def _print_template_update_info(self, subproject_template: Template) -> None:
-        # TODO Unify printing tools
-        if not self.quiet:
-            if subproject_template.version == self.template.version:
-                message = f"Keeping template version {self.template.version}"
-            else:
-                message = f"Updating to template version {self.template.version}"
-            print(message, file=sys.stderr)
-
-    @as_operation("update")
-    def run_update(self) -> None:
-        """Update a subproject that was already generated.
-
-        See [updating a project][updating-a-project].
-        """
+    def _pre_update(self) -> None:
+        """All validation checks before the update questionnaire."""
         self._check_unsafe("update")
-        # Check all you need is there
         if self.subproject.vcs != "git":
             raise UserMessageError(
                 "Updating is only supported in git-tracked subprojects."
@@ -1161,19 +1116,57 @@ class Worker:
                 "Downgrades are not supported."
             )
         if not self.overwrite:
-            # Only git-tracked subprojects can be updated, so the user can
-            # review the diff before committing; so we can safely avoid
-            # asking for confirmation
             raise UserMessageError("Enable overwrite to update a subproject.")
         self._print_message(self.template.message_before_update)
         self._print_template_update_info(self.subproject.template)
         with suppress(AttributeError):
-            # We might have switched operation context, ensure the cached property
-            # is regenerated to re-render templates.
             del self.match_exclude
 
+    def _finalize_update(self) -> None:
+        """Apply the update diff and print messages after update."""
         self._apply_update()
         self._print_message(self.template.message_after_update)
+
+    @as_operation("copy")
+    def run_copy(self) -> None:
+        """Generate a subproject from zero, ignoring what was in the folder.
+
+        If `dst_path` was missing, it will be
+        created. Otherwise, `src_path` be rendered
+        directly into it, without worrying about evolving what was there
+        already.
+
+        See [generating a project][generating-a-project].
+        """
+        self._pre_copy()
+        with Phase.use(Phase.PROMPT):
+            self._ask_all()
+        self._finalize_copy()
+
+    @as_operation("copy")
+    def run_recopy(self) -> None:
+        """Update a subproject, keeping answers but discarding evolution."""
+        self._pre_recopy()
+        with replace(self, src_path=self.subproject.template.url) as new_worker:  # type: ignore[union-attr]
+            new_worker.run_copy()
+
+    def _print_template_update_info(self, subproject_template: Template) -> None:
+        # TODO Unify printing tools
+        if not self.quiet:
+            if subproject_template.version == self.template.version:
+                message = f"Keeping template version {self.template.version}"
+            else:
+                message = f"Updating to template version {self.template.version}"
+            print(message, file=sys.stderr)
+
+    @as_operation("update")
+    def run_update(self) -> None:
+        """Update a subproject that was already generated.
+
+        See [updating a project][updating-a-project].
+        """
+        self._pre_update()
+        self._finalize_update()
 
     def _apply_update(self) -> None:  # noqa: C901
         git = get_git()
@@ -1501,6 +1494,181 @@ class Worker:
         )
 
 
+@dataclass(config=ConfigDict(extra="forbid", arbitrary_types_allowed=True))
+class SyncWorker(Worker):
+    """Worker for synchronous (interactive) usage, e.g. CLI."""
+
+    ui: QuestionnaireUI = field(default_factory=InteractiveUI)
+
+    def _ask_all(self) -> None:
+        self.ask()
+
+    def ask(self) -> None:
+        state = self._init_questionnaire()
+
+        for question_name, details in self.template.questions_data.items():
+            node = QuestionNode(question_name, details, state)
+            node.process(self.ui)
+
+        self.answers.external = self._external_data()
+
+
+@dataclass(config=ConfigDict(extra="forbid", arbitrary_types_allowed=True))
+class AsyncWorker(Worker):
+    """Worker for asynchronous (programmatic) usage, e.g. MCP servers.
+
+    Designed for MCP servers and other external callers that need to drive
+    the Copier questionnaire step-by-step without terminal I/O.
+
+    Typical usage::
+
+        with AsyncWorker(src_path=src, dst_path=dst) as w:
+            question = w.start_copy()
+            while question is not None:
+                answer = get_answer_from_user(question)
+                question = w.submit_answer(question.name, answer)
+            w.finish()
+    """
+
+    ui: QuestionnaireUI = field(default_factory=ProgrammaticUI)
+    _pending: QuestionPendingError | None = field(default=None, init=False)
+    _state: GlobalState | None = field(default=None, init=False)
+    _operation_token: Any = field(default=None, init=False)
+    _current_operation: Operation | None = field(default=None, init=False)
+
+    def _ask_all(self) -> None:
+        """Complete the full questionnaire in one pass.
+
+        Used internally when this worker is created via ``replace()`` inside
+        ``_apply_update`` with ``defaults=True``, where no interactive
+        questions are expected.
+        """
+        while self._ask_next() is not None:
+            pass
+
+    def _ask_next(self) -> Question | None:
+        """Single pass through the question tree.
+
+        Returns the Question for the next pending question, or None if the
+        questionnaire is complete.
+        """
+        if self._state is None:
+            self._state = self._init_questionnaire()
+        for question_name, details in self.template.questions_data.items():
+            node = QuestionNode(question_name, details, self._state)
+            try:
+                node.process(self.ui)
+            except QuestionPendingError as qp:
+                self._pending = qp
+                return qp.question
+
+        self.answers.external = self._external_data()
+        return None
+
+    def _set_operation(self, operation: Operation) -> None:
+        """Set the operation context for the duration of the async flow."""
+        self._current_operation = operation
+        self._operation_token = _operation.set(operation)
+
+    def _clear_operation(self) -> None:
+        """Reset the operation context."""
+        if self._operation_token is not None:
+            _operation.reset(self._operation_token)
+            self._operation_token = None
+            self._current_operation = None
+
+    def start_copy(self) -> Question | None:
+        """Begin a copy operation and return the first question, or None.
+
+        Performs all pre-copy validation and setup, then starts the
+        questionnaire. Returns the first Question that needs an answer,
+        or None if the questionnaire completed (e.g. all defaults).
+        """
+        self._set_operation("copy")
+        self._pre_copy()
+        return self._ask_next()
+
+    def start_recopy(self) -> Question | None:
+        """Begin a recopy operation and return the first question, or None."""
+        self._set_operation("copy")
+        self._pre_recopy()
+        # Recopy is a copy with the original template's src_path.
+        # We store it so finish() can use it.
+        # Unlike SyncWorker.run_recopy which uses replace(), here we
+        # update src_path directly since the async flow is step-by-step.
+        self.src_path = self.subproject.template.url  # type: ignore[union-attr]
+        self._pre_copy()
+        return self._ask_next()
+
+    def start_update(self) -> Question | None:
+        """Begin an update operation and return the first question, or None.
+
+        Note: the update questionnaire happens inside ``_apply_update`` via
+        internal sub-workers with ``defaults=True``. The questions returned
+        here come from the main update flow only.
+        """
+        self._set_operation("update")
+        self._pre_update()
+        # update has no direct questionnaire — it happens inside _apply_update
+        # via sub-workers. Return None to signal readiness for finish().
+        return None
+
+    def submit_answer(self, var_name: str, value: Any) -> Question | None:
+        """Validate and record an answer, then return the next question or None.
+
+        Args:
+            var_name: The question's variable name (must match the pending
+                question's name).
+            value: The raw answer value supplied by the caller.
+
+        Returns:
+            The next Question that needs an answer, or None if the
+            questionnaire is complete.
+
+        Raises:
+            RuntimeError: If there is no pending question.
+            ValueError: If ``var_name`` does not match the pending question.
+            ValueError: If validation fails (message from the validator).
+        """
+        if self._pending is None:
+            raise RuntimeError("No pending question")
+        assert self._state is not None
+        q = self._pending.question
+        if var_name != q.name:
+            raise ValueError(f"Expected answer for {q.name!r}, got {var_name!r}")
+        parsed = q.transform_answer(value)
+        result = q.validate_answer(str(value))
+        if result is not True:
+            raise ValueError(result)
+        self._state.answers.user[var_name] = parsed
+        self._pending = None
+        return self._ask_next()
+
+    def finish(self) -> None:
+        """Finalize the current operation (render, tasks, etc.).
+
+        Must be called after the questionnaire is complete (i.e. after
+        ``start_*`` or ``submit_answer`` returned None).
+
+        Raises:
+            RuntimeError: If no operation was started or if there are
+                still pending questions.
+        """
+        if self._current_operation is None:
+            raise RuntimeError("No operation started — call start_copy/update first")
+        if self._pending is not None:
+            raise RuntimeError(
+                f"Cannot finish: question {self._pending.question.name!r} is pending"
+            )
+        try:
+            if self._current_operation == "copy":
+                self._finalize_copy()
+            elif self._current_operation == "update":
+                self._finalize_update()
+        finally:
+            self._clear_operation()
+
+
 def run_copy(
     src_path: str,
     dst_path: Path | str = ".",
@@ -1522,7 +1690,7 @@ def run_copy(
     skip_tasks: bool = False,
 ) -> Worker:
     """Copy a template to a destination, from zero."""
-    with Worker(
+    with SyncWorker(
         src_path=src_path,
         dst_path=Path(dst_path),
         data=data or {},
@@ -1574,7 +1742,7 @@ def run_recopy(
     skip_tasks: bool = False,
 ) -> Worker:
     """Update a subproject from its template, discarding subproject evolution."""
-    with Worker(
+    with SyncWorker(
         dst_path=Path(dst_path),
         data=data or {},
         answers_file=(
@@ -1628,7 +1796,7 @@ def run_update(
     skip_tasks: bool = False,
 ) -> Worker:
     """Update a subproject, from its template."""
-    with Worker(
+    with SyncWorker(
         dst_path=Path(dst_path),
         data=data or {},
         answers_file=(

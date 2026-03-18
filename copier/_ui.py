@@ -13,7 +13,7 @@ from questionary.prompts.common import Choice as QChoice
 
 from ._tools import force_str_end
 from ._types import MISSING, AnyByStrDict
-from .errors import InteractiveSessionError
+from .errors import InteractiveSessionError, QuestionPendingError
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -240,3 +240,23 @@ class InteractiveUI:
             ],
             style="bold",
         )
+
+
+class ProgrammaticUI:
+    """Non-interactive UI that raises ``QuestionPendingError`` for each question.
+
+    Silent questions (``when=False``) are answered automatically with their
+    default value; all others propagate a ``QuestionPending`` exception to the
+    caller so that it can supply an answer and trigger the next replay.
+    """
+
+    def ask_question(self, question: Question, level: int = 0) -> Any:
+        if question.silent:
+            default = question.default
+            if default is not MISSING:
+                return question.transform_answer(default)
+            return None
+        raise QuestionPendingError(question, level)
+
+    def show_group_message(self, message: str, level: int = 0) -> None:
+        pass

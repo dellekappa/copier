@@ -9,7 +9,7 @@ from plumbum import local
 from pytest_gitconfig.plugin import GitConfig
 
 from copier import run_copy, run_update
-from copier._main import Worker
+from copier._main import SyncWorker
 from copier._user_data import load_answersfile_data
 from copier._vcs import checkout_latest_tag, clone, get_git_version, get_repo
 from copier.errors import DirtyLocalWarning, ShallowCloneWarning
@@ -138,7 +138,7 @@ def test_shallow_clone(tmp_path: Path, recwarn: pytest.WarningsRecorder) -> None
 @pytest.mark.impure
 def test_removes_temporary_clone(tmp_path: Path) -> None:
     src_path = "https://github.com/copier-org/autopretty.git"
-    with Worker(
+    with SyncWorker(
         src_path=src_path, dst_path=tmp_path, defaults=True, unsafe=True
     ) as worker:
         worker.run_copy()
@@ -150,7 +150,7 @@ def test_removes_temporary_clone(tmp_path: Path) -> None:
 def test_dont_remove_local_clone(tmp_path: Path) -> None:
     src_path = str(tmp_path / "autopretty")
     git("clone", "https://github.com/copier-org/autopretty.git", src_path)
-    with Worker(
+    with SyncWorker(
         src_path=src_path, dst_path=tmp_path, defaults=True, unsafe=True
     ) as worker:
         worker.run_copy()

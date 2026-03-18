@@ -20,9 +20,7 @@ from prompt_toolkit.keys import Keys
 from pytest_gitconfig.plugin import DEFAULT_GIT_USER_EMAIL, DEFAULT_GIT_USER_NAME
 
 import copier
-from copier import QuestionPending
-from copier._types import MISSING, StrOrPath
-from copier._ui import Question
+from copier._types import StrOrPath
 
 if TYPE_CHECKING:
     from pexpect.spawnbase import SpawnBase
@@ -98,46 +96,6 @@ class Keyboard(str, Enum):
     Alt = Esc
     Backspace = ControlH
     Tab = ControlI
-
-
-class ProgrammaticUI:
-    """Non-interactive UI for programmatic control of the questionnaire.
-
-    Designed for MCP servers and other external callers that need to drive
-    the Copier questionnaire step-by-step without terminal I/O.
-
-    In the unified flow, QuestionNode._ask_question() always raises
-    QuestionPending. The Worker replay loop catches it and calls
-    ui.ask_question(). This implementation re-raises QuestionPending,
-    propagating it to the external caller which provides the answer
-    and triggers the next replay.
-
-    Typical usage via Worker::
-
-        with Worker(src_path=src, dst_path=dst, defaults=False) as w:
-            try:
-                w.run_copy()  # internally runs the replay loop
-            except QuestionPending as qp:
-                # MCP server receives the question metadata
-                answer = get_answer_from_ai(qp.question_info)
-                # ... provide answer and re-run ...
-    """
-
-    def ask_question(self, question: Question, level: int = 0) -> Any:
-        # when=False: return the default value or None
-        # without raising QuestionPending, since no user interaction
-        # is needed
-        if question.silent:
-            default = question.default
-            if default is not MISSING:
-                return question.transform_answer(default)
-            return None
-
-        """Raise QuestionPending to let external caller collect the answer."""
-        raise QuestionPending(question, level)
-
-    def show_group_message(self, message: str, level: int = 0) -> None:
-        """No-op: group messages are included in the next QuestionPending."""
 
 
 def render(tmp_path: Path, **kwargs: Any) -> None:

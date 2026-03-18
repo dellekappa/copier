@@ -10,7 +10,7 @@ import yaml
 from pexpect.popen_spawn import PopenSpawn
 from plumbum import local
 
-from copier._main import Worker
+from copier._main import SyncWorker
 from copier._types import AnyByStrDict
 from copier._user_data import load_answersfile_data
 from copier.errors import InvalidTypeError
@@ -214,11 +214,11 @@ def test_templated_prompt_custom_envops(
             (src / "result.jinja"): "<<sentence>>",
         }
     )
-    worker1 = Worker(str(src), dst, defaults=True, overwrite=True)
+    worker1 = SyncWorker(str(src), dst, defaults=True, overwrite=True)
     worker1.run_copy()
     assert (dst / "result").read_text() == "It's over 9000!"
 
-    worker2 = Worker(
+    worker2 = SyncWorker(
         str(src), dst, data={"powerlevel": 1}, defaults=True, overwrite=True
     )
     worker2.run_copy()
@@ -244,7 +244,7 @@ def test_templated_prompt_builtins(tmp_path_factory: pytest.TempPathFactory) -> 
         }
     )
     with pytest.warns(FutureWarning) as warnings:
-        Worker(str(src), dst, defaults=True, overwrite=True).run_copy()
+        SyncWorker(str(src), dst, defaults=True, overwrite=True).run_copy()
     assert len([w for w in warnings if w.category is FutureWarning]) == 2
     that_now = datetime.fromisoformat((dst / "now").read_text())
     assert that_now <= datetime.utcnow()
@@ -273,7 +273,7 @@ def test_templated_prompt_invalid(
             src / "result.jinja": "{{question}}",
         }
     )
-    worker = Worker(str(src), dst, data={"question": ""}, overwrite=True)
+    worker = SyncWorker(str(src), dst, data={"question": ""}, overwrite=True)
     if raises:
         with pytest.raises(raises):
             worker.run_copy()

@@ -12,7 +12,7 @@ import pytest
 from plumbum import local
 
 from copier._cli import CopierApp
-from copier._main import Worker, run_copy, run_update
+from copier._main import SyncWorker, run_copy, run_update
 from copier._tools import normalize_git_path
 from copier._types import VcsRef
 from copier._user_data import load_answersfile_data
@@ -282,7 +282,7 @@ def test_updatediff(tmp_path_factory: pytest.TempPathFactory) -> None:
         )
         commit("-m", "Subproject evolved")
         # Reapply template ignoring subproject evolution
-        Worker(
+        SyncWorker(
             data={"author_name": "Largo LaGrande", "project_name": "to steal a lot"},
             defaults=True,
             overwrite=True,

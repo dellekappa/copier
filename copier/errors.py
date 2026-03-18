@@ -7,14 +7,15 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ._tools import printf_exception
 from ._types import PathSeq
 
 if TYPE_CHECKING:  # always false
     from ._template import Template
-    from ._user_data import AnswersMap, Question
+    from ._ui import Question
+    from ._user_data import AnswersMap, Question as UserDataQuestion
 
 if sys.version_info < (3, 11):
     from typing_extensions import Self
@@ -48,8 +49,7 @@ __all__ = [
     "MissingSettingsWarning",
     "MissingFileWarning",
     "InteractiveSessionError",
-    "QuestionPending",
-    "NoMoreQuestionsError",
+    "QuestionPendingError",
 ]
 
 
@@ -148,7 +148,7 @@ class CopierAnswersInterrupt(CopierError, KeyboardInterrupt):
     """
 
     def __init__(
-        self, answers: AnswersMap, last_question: Question, template: Template
+        self, answers: AnswersMap, last_question: UserDataQuestion, template: Template
     ) -> None:
         self.answers = answers
         self.last_question = last_question
@@ -244,11 +244,7 @@ class SettingsError(CopierError):
     """Exception raised when the settings are invalid."""
 
 
-class NoMoreQuestionsError(CopierError):
-    """Raised when there are no more questions to ask."""
-
-
-class QuestionPending(CopierError):
+class QuestionPendingError(CopierError):
     """Raised to interrupt the tree walk at an unanswered question.
 
     This is a control flow mechanism, not an error. When QuestionNode.process()
@@ -266,7 +262,7 @@ class QuestionPending(CopierError):
 
     def __init__(
         self,
-        question: Any,
+        question: Question,
         level: int = 0,
     ) -> None:
         self.question = question
